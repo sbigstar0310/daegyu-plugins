@@ -1,0 +1,6 @@
+{
+  "name": "notion-manager",
+  "version": "1.0.0",
+  "description": "Notion workspace manager - Daily Log, TODO, experiment reports",
+  "author": { "name": "daegyu" }
+}

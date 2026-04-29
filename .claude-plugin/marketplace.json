@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claude-sbigstar0310-plugins",
+  "description": "Personal Claude Code plugins by sbigstar0310 (notion-manager etc.)",
+  "owner": {
+    "name": "sbigstar0310"
+  },
+  "plugins": [
+    {
+      "name": "notion-manager",
+      "description": "Notion workspace manager - Daily Log, TODO, experiment reports",
+      "author": {
+        "name": "sbigstar0310"
+      },
+      "category": "productivity",
+      "source": "./notion-manager"
+    }
+  ]
+}
