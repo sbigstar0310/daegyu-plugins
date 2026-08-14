@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "claude-sbigstar0310-plugins",
-  "description": "Personal Claude Code plugins by sbigstar0310 (notion-manager etc.)",
+  "description": "Personal Claude Code plugins by sbigstar0310 (notion-manager, progress, pptx-deck)",
   "owner": {
     "name": "sbigstar0310"
   },
@@ -9,11 +9,23 @@
     {
       "name": "notion-manager",
       "description": "Notion workspace manager - Daily Log, TODO, experiment reports",
-      "author": {
-        "name": "sbigstar0310"
-      },
+      "author": { "name": "sbigstar0310" },
       "category": "productivity",
       "source": "./notion-manager"
+    },
+    {
+      "name": "progress",
+      "description": "Live status of long-running jobs - ETA-first, discovered from tmux/logs/GPU",
+      "author": { "name": "sbigstar0310" },
+      "category": "productivity",
+      "source": "./progress"
+    },
+    {
+      "name": "pptx-deck",
+      "description": "Design-aligned .pptx deck builder with faithful PNG previews",
+      "author": { "name": "sbigstar0310" },
+      "category": "productivity",
+      "source": "./pptx-deck"
     }
   ]
 }

@@ -1,0 +1,6 @@
+{
+  "name": "pptx-deck",
+  "version": "1.0.0",
+  "description": "Design-aligned .pptx deck builder with faithful PNG previews",
+  "author": { "name": "daegyu" }
+}

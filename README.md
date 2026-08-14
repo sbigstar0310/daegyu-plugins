@@ -7,10 +7,23 @@ Personal Claude Code plugins by [@sbigstar0310](https://github.com/sbigstar0310)
 | Plugin | Description |
 |---|---|
 | `notion-manager` | Notion workspace manager — Daily Log, TODO, experiment reports |
+| `progress` | Live status of long-running jobs — ETA-first, discovered from tmux/logs/GPU |
+| `pptx-deck` | Design-aligned `.pptx` deck builder with faithful PNG previews |
 
 ## Install
 
 ```
 /plugin marketplace add sbigstar0310/claude-sbigstar0310-plugins
 /plugin install notion-manager@claude-sbigstar0310-plugins
+/plugin install progress@claude-sbigstar0310-plugins
+/plugin install pptx-deck@claude-sbigstar0310-plugins
 ```
+
+Install only what you need — each skill is its own plugin.
+
+## Notes
+
+- **`pptx-deck`** needs `python-pptx`, `matplotlib`, `numpy`, `Pillow` for its
+  render/preview scripts. Install them in whatever interpreter you point the skill at.
+- **`progress`** reports clock times in KST (Asia/Seoul). Change the timezone in
+  `skills/progress/SKILL.md` if you are elsewhere.

@@ -1,0 +1,6 @@
+{
+  "name": "progress",
+  "version": "1.0.0",
+  "description": "Live status of long-running jobs — ETA-first, discovered from tmux/logs/GPU",
+  "author": { "name": "daegyu" }
+}
