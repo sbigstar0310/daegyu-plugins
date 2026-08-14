@@ -1,4 +1,4 @@
-# claude-plugins
+# daegyu-plugins
 
 Personal Claude Code plugins by [@sbigstar0310](https://github.com/sbigstar0310).
 
@@ -14,12 +14,17 @@ Personal Claude Code plugins by [@sbigstar0310](https://github.com/sbigstar0310)
 
 ```
 /plugin marketplace add sbigstar0310/claude-plugins
-/plugin install notion-manager@claude-plugins
-/plugin install progress@claude-plugins
-/plugin install pptx-deck@claude-plugins
+/plugin install notion-manager@daegyu-plugins
+/plugin install progress@daegyu-plugins
+/plugin install pptx-deck@daegyu-plugins
 ```
 
 Install only what you need — each skill is its own plugin.
+
+> The repo path is `sbigstar0310/claude-plugins` but the **marketplace name is
+> `daegyu-plugins`** — that is the `@suffix` you install with. They differ because
+> Claude Code rejects marketplace names starting with `claude-` (they read as
+> impersonating an official Anthropic marketplace).
 
 ## Notes
 

@@ -1,6 +1,6 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "claude-plugins",
+  "name": "daegyu-plugins",
   "description": "Personal Claude Code plugins by sbigstar0310 (notion-manager, progress, pptx-deck)",
   "owner": {
     "name": "sbigstar0310"
