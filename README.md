@@ -1,4 +1,4 @@
-# claude-sbigstar0310-plugins
+# claude-plugins
 
 Personal Claude Code plugins by [@sbigstar0310](https://github.com/sbigstar0310).
 
@@ -13,10 +13,10 @@ Personal Claude Code plugins by [@sbigstar0310](https://github.com/sbigstar0310)
 ## Install
 
 ```
-/plugin marketplace add sbigstar0310/claude-sbigstar0310-plugins
-/plugin install notion-manager@claude-sbigstar0310-plugins
-/plugin install progress@claude-sbigstar0310-plugins
-/plugin install pptx-deck@claude-sbigstar0310-plugins
+/plugin marketplace add sbigstar0310/claude-plugins
+/plugin install notion-manager@claude-plugins
+/plugin install progress@claude-plugins
+/plugin install pptx-deck@claude-plugins
 ```
 
 Install only what you need — each skill is its own plugin.
