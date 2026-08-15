@@ -221,30 +221,35 @@ mobile-qa/
 │   ├── mobile-qa-device          # pinned agent-device launcher
 │   ├── agent-device              # shim -> mobile-qa-device
 │   └── mobile-qa-preflight       # environment verification
-├── examples/                     # copy and edit; never use as-is
-│   ├── mobile-qa.config.json
-│   ├── mobile-qa.local.json
-│   ├── screens.md
-│   └── flows.md
-└── legacy-mobile-mcp/            # TRANSITIONAL — see below
+└── examples/                     # copy and edit; never use as-is
+    ├── mobile-qa.config.json
+    ├── mobile-qa.local.json
+    ├── screens.md
+    └── flows.md
 ```
 
-### `legacy-mobile-mcp/` is transitional
+### The pre-migration Mobile MCP version lives in git history
 
-It holds the complete pre-migration plugin: the original `plugin.json`,
-`README-original.md`, both agents, all three skills, all four examples, and the
-three superseded scripts (`srr-qa-preflight`, `srr-qa-state`,
-`srr-qa-android-login` — about 110KB of shell that agent-device makes
-unnecessary).
+This plugin previously carried a `legacy-mobile-mcp/` directory holding the
+complete pre-`agent-device` plugin — the original manifest and README, both
+agents, all three skills, all four examples, and ~110KB of superseded shell
+(`srr-qa-preflight`, `srr-qa-state`, `srr-qa-android-login`). It was removed
+because carrying two descriptions of the same procedure is exactly the drift
+problem this migration set out to eliminate.
 
-**Nothing was deleted in this migration.** It is kept so the accumulated
-Mobile MCP knowledge can be diffed and recovered if the migration is reverted.
-It is **not loaded** by the plugin — it contains no `.claude-plugin/` manifest,
-and its `agents/` and `skills/` are not at the paths Claude Code scans.
+Nothing was lost. It is recoverable in full from commit **`fe4412c`** of the
+`daegyu-plugins` repository:
 
-**Delete this directory once agent-device is proven on real hardware.** Keeping
-two descriptions of the same procedure indefinitely is the drift problem this
-migration was meant to fix.
+```bash
+git show fe4412c --stat -- mobile-qa/legacy-mobile-mcp
+git checkout fe4412c -- mobile-qa/legacy-mobile-mcp     # if you really need it back
+```
+
+Its three big workaround classes (text-entry chunking, Gboard IME recovery,
+iOS point-to-pixel coordinate math) are obsolete under agent-device and are
+described in the table at the top of this README. One fact that was *not*
+driver-specific — the Expo dev-launcher menu masquerading as the app on a cold
+start — was ported forward into `skills/qa-preflight/SKILL.md`.
 
 ### Agents
 

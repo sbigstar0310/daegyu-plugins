@@ -1,8 +1,0 @@
-{
-  "_comment": "EXAMPLE — 비밀값 전용. $PROJECT_ROOT/.claude/mobile-qa.local.json 으로 복사할 것. 반드시 .gitignore 에 추가한다 (.claude/mobile-qa.local.json). 아래 값은 자리표시자다 — 실제 비밀번호를 이 예제 파일에 적지 말 것.",
-
-  "auth": {
-    "email": "qa-account@example.com",
-    "password": "REPLACE_ME"
-  }
-}

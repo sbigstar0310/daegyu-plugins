@@ -195,6 +195,17 @@ first tap and hides content. If `quirks.dismissLogBox` is true, dismiss it befor
 testing — and **report that it was present**, since it usually means the app
 logged an error worth knowing about.
 
+**The Expo dev-launcher menu is not your app.** A dev-client build that is
+launched cold, without a deep link into the running dev server, stops on the
+**development-server selection menu**. The process is running and the app looks
+"launched", but every element you observe belongs to the launcher, not to the
+app. Neither `loggedInMarkers` nor `loggedOutMarkers` will match, and the usual
+mistake is to report that as an app defect or as an unknown third screen.
+Recognise it, connect to the dev server (deep link or tap the entry for the
+running Metro), confirm the app's own first screen, and only then judge login
+state. This is Expo dev-client behavior and is independent of which driver you
+use.
+
 **Permission dialogs and system prompts** are part of the app's real startup.
 Do not pre-clear them unless the flow under test says to; how the app handles
 them is often the thing being tested.

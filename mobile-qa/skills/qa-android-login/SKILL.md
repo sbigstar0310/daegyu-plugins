@@ -21,8 +21,8 @@ in *this* app, **what** counts as success, and **when to stop**.
 > **All of it is obsolete.** agent-device owns Android text entry and ships its
 > own test IME, and addresses elements by semantic ref rather than coordinate.
 > If you find yourself reaching for `adb shell input` or `ime set`, stop — you
-> are fighting the driver, and the old script is kept only in
-> `legacy-mobile-mcp/bin/` for reference.
+> are fighting the driver. The old script was deleted; it is recoverable from
+> commit `fe4412c` of the daegyu-plugins repository if it is ever needed.
 
 ---
 
