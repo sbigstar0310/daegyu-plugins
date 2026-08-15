@@ -153,6 +153,12 @@ problem and re-snapshotting does not fix it. Taps aimed at such a wrapper landed
 on the bottom tab bar instead of the intended control, twice. Targeting the
 deepest `Text` leaf worked.
 
+An element missing from the snapshot altogether is usually an **app gap worth
+filing**, not a driver failure: RN `TouchableOpacity` needs `accessible` +
+`accessibilityRole="button"` + `testID` + `accessibilityLabel` to be reliably
+addressable, and `accessible={true}` on a parent `View` **hides its children** from
+the tree.
+
 ### Refs are per-snapshot, and a stale one lies
 
 - A ref printed **inside a `--settle` diff is not addressable**. Using one yields
