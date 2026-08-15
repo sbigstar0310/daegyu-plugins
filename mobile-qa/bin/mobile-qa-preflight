@@ -72,6 +72,10 @@ Options:
   -v, --verbose       echo the commands being run
   -h, --help          this
 
+Android note: a missing 'adb reverse tcp:<metro port>' is a BLOCKER for an
+  emulator target, not a warning - without it the emulator cannot fetch a Metro
+  bundle. Set MOBILE_QA_SKIP_ADB_REVERSE=1 for a build that needs no Metro.
+
 Config: \$PROJECT_ROOT/.claude/mobile-qa.config.json  (or \$MOBILE_QA_CONFIG)
 Secrets: \$PROJECT_ROOT/.claude/mobile-qa.local.json, or MOBILE_QA_EMAIL /
          MOBILE_QA_PASSWORD. Never passed on a command line by this script.
@@ -300,10 +304,17 @@ check_metro() {
 # ---------------------------------------------------------------------------
 # device / app readiness -> agent-device doctor
 # ---------------------------------------------------------------------------
-# NOTE: the exact stdout shape of `agent-device doctor` is version-specific and
-# is NOT parsed here. Only its exit code is treated as a contract; the text is
-# echoed for the human and summarised into *_FIX. If a future version changes
-# its output, this keeps working.
+# NOTE: the exact stdout shape of `agent-device doctor` is version-specific, so
+# this parses as little of it as it can get away with - the text is echoed for
+# the human and summarised into *_FIX.
+#
+# But the exit code alone is NOT the contract, and treating it as one was a real
+# bug: agent-device 0.20.8 printed "Doctor: fail" and still exited 0, so this
+# script reported PREFLIGHT_RESULT=OK / ANDROID_STATUS=READY for an environment
+# that was not ready. One narrow extra rule - a verdict line saying "fail" - now
+# also blocks. If a future version renames that line the check simply stops
+# matching and behaviour falls back to the exit code, which is the old (wrong but
+# not worse) behaviour.
 run_doctor() {
   local platform="$1" app="$2" device="$3"
   local args=(doctor --platform "$platform")
@@ -335,8 +346,56 @@ run_doctor() {
     printf 'BLOCKED|%s' "$(oneline "$(printf '%s' "$out" | grep -iE 'error|not found|no (booted|connected|device)|missing|install' | head -2)")"
     return 0
   fi
+  # exit 0 but a failing verdict line - see the note above run_doctor()
+  if printf '%s' "$out" | grep -qiE '^[[:space:]]*doctor:[[:space:]]*fail'; then
+    warn "doctor exited 0 but reported a failing verdict - treating as BLOCKED"
+    printf 'BLOCKED|%s' "$(oneline "$(printf '%s' "$out" | grep -iE 'doctor:[[:space:]]*fail|error|not found|missing|install' | head -2)")"
+    return 0
+  fi
   printf 'READY|'
   return 0
+}
+
+# ---------------------------------------------------------------------------
+# android: the Metro reverse tunnel is load-bearing, not advisory
+# ---------------------------------------------------------------------------
+# Without `adb reverse`, an emulator running a dev-client build cannot fetch a
+# Metro bundle at all - so a warning here turns into "the app will not start"
+# several turns later, attributed to the app. Promoted to a blocker.
+#
+# doctor has its own 'android-reverse' line, but a missing tunnel is reported
+# there as an advisory while the verdict stays 'Doctor: pass' - so the exit-code
+# fix above does not catch it. This check is what turns it into a blocker.
+#
+# Deliberately narrow, to avoid blocking runs that genuinely do not need it:
+# only when adb exists, Metro is up, and the target is exactly one *emulator*.
+# A physical device on the same LAN reaches Metro by IP and is skipped, as is a
+# release build (MOBILE_QA_SKIP_ADB_REVERSE=1).
+check_adb_reverse() {
+  [ "${MOBILE_QA_SKIP_ADB_REVERSE:-0}" = "1" ] && return 0
+  command -v adb >/dev/null 2>&1 || return 0
+  case "$METRO_STATE" in UP|STARTED) ;; *) return 0 ;; esac
+
+  local serial="" emus
+  if [ -n "$ANDROID_DEVICE" ]; then
+    case "$ANDROID_DEVICE" in emulator-*) serial="$ANDROID_DEVICE" ;; *) return 0 ;; esac
+  else
+    emus="$(adb devices 2>/dev/null | awk '$2 == "device" && $1 ~ /^emulator-/ { print $1 }')"
+    [ "$(printf '%s' "$emus" | grep -c . || true)" -eq 1 ] || return 0
+    serial="$emus"
+  fi
+
+  step "android metro reverse tunnel ($serial)"
+  if adb -s "$serial" reverse --list 2>/dev/null | grep -q "tcp:$METRO_PORT"; then
+    ok "adb reverse tcp:$METRO_PORT is up"
+    return 0
+  fi
+  fail "no adb reverse tunnel for Metro - the emulator cannot fetch a bundle"
+  log "       fix:  adb -s $serial reverse tcp:$METRO_PORT tcp:$METRO_PORT"
+  log "       skip: MOBILE_QA_SKIP_ADB_REVERSE=1 (only if this build needs no Metro)"
+  ANDROID_STATUS="BLOCKED"
+  ANDROID_FIX="adb -s $serial reverse tcp:$METRO_PORT tcp:$METRO_PORT"
+  return 1
 }
 
 do_platform() {
@@ -406,7 +465,10 @@ main() {
   check_metro || metro_ok=0
 
   [ "$WANT_IOS" -eq 1 ]     && do_platform ios "$IOS_APP" "$IOS_DEVICE"
-  [ "$WANT_ANDROID" -eq 1 ] && do_platform android "$ANDROID_APP" "$ANDROID_DEVICE"
+  if [ "$WANT_ANDROID" -eq 1 ]; then
+    do_platform android "$ANDROID_APP" "$ANDROID_DEVICE"
+    check_adb_reverse || true
+  fi
 
   local ready=0 asked=0
   for s in "$IOS_STATUS" "$ANDROID_STATUS"; do
