@@ -1,0 +1,427 @@
+#!/usr/bin/env bash
+#
+# mobile-qa-preflight - get a React Native / Expo QA environment into a testable
+#                       state, or fail with something actionable.
+#
+# What this does:
+#   1. resolve the project and its mobile-qa config, and validate it
+#   2. resolve a Node >= the pin floor and the pinned agent-device
+#   3. check Metro
+#   4. hand device / app / toolchain readiness to `agent-device doctor`
+#
+# What this deliberately does NOT do:
+#   - boot simulators, install apps, open sessions, or detect login state.
+#     agent-device owns the device lifecycle and the session; the agent owns the
+#     screen. Duplicating either here is how the two drift apart.
+#
+# Everything app-specific comes from config. This script never guesses a bundle
+# id, a package name, or a device.
+set -euo pipefail
+
+SCRIPT_NAME="$(basename "$0")"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+DEVICE_BIN="$SELF_DIR/mobile-qa-device"
+
+EX_OK=0
+EX_DEGRADED=1
+EX_USAGE=2
+EX_BLOCKED=3
+EX_CONFIG=4
+
+VERBOSE=0
+WANT_IOS=0
+WANT_ANDROID=0
+START_METRO=0
+DOCTOR_TIMEOUT=90
+
+PROJECT_ROOT=""
+CFG_MAIN=""
+CFG_LOCAL=""
+
+METRO_PORT=8081
+METRO_START_CMD="npm start"
+METRO_STATE="UNKNOWN"
+METRO_PID=""
+
+IOS_APP=""; IOS_DEVICE=""; ANDROID_APP=""; ANDROID_DEVICE=""
+IOS_STATUS="NOT_REQUESTED"; IOS_FIX=""
+ANDROID_STATUS="NOT_REQUESTED"; ANDROID_FIX=""
+NODE_VERSION=""; DRIVER_VERSION=""; DRIVER_SOURCE=""
+PREFLIGHT_RESULT="UNKNOWN"
+
+log()  { printf '%s\n' "$*" >&2; }
+vlog() { [ "$VERBOSE" -eq 1 ] && printf '+ %s\n' "$*" >&2 || true; }
+ok()   { printf '  [ ok ] %s\n' "$*" >&2; }
+warn() { printf '  [warn] %s\n' "$*" >&2; }
+fail() { printf '  [FAIL] %s\n' "$*" >&2; }
+step() { printf '\n== %s\n' "$*" >&2; }
+oneline() { printf '%s' "$*" | tr '\n\r' '  ' | sed 's/   */ /g' | cut -c1-400; }
+
+usage() {
+  cat <<EOF
+$SCRIPT_NAME [ios|android|all] [options]
+
+Bring a React Native / Expo QA environment to a testable state and report it in
+a machine-readable block on stdout. Human progress goes to stderr.
+
+Options:
+  --start-metro       start Metro in the background if it is down.
+                      Without this flag a down Metro is a hard failure - an
+                      unannounced background process is worse than a clear error.
+  --timeout N         seconds allowed for 'agent-device doctor' (default 90)
+  -v, --verbose       echo the commands being run
+  -h, --help          this
+
+Config: \$PROJECT_ROOT/.claude/mobile-qa.config.json  (or \$MOBILE_QA_CONFIG)
+Secrets: \$PROJECT_ROOT/.claude/mobile-qa.local.json, or MOBILE_QA_EMAIL /
+         MOBILE_QA_PASSWORD. Never passed on a command line by this script.
+
+stdout contract:
+  === MOBILE-QA-PREFLIGHT-SUMMARY ===
+  PREFLIGHT_RESULT=OK|DEGRADED|BLOCKED|CONFIG_ERROR
+  NODE_VERSION=          DRIVER_VERSION=       DRIVER_SOURCE=
+  METRO=UP|DOWN|PORT_BUSY_NOT_METRO|STARTED
+  IOS_STATUS=READY|BLOCKED|UNAVAILABLE|NOT_REQUESTED     IOS_FIX=<command>
+  ANDROID_STATUS=...                                     ANDROID_FIX=<command>
+  === END-SUMMARY ===
+
+Exit: 0 OK - 1 DEGRADED (one platform ready) - 2 usage - 3 BLOCKED - 4 config
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# config
+# ---------------------------------------------------------------------------
+resolve_project_root() {
+  if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then PROJECT_ROOT="$CLAUDE_PROJECT_DIR"; return 0; fi
+  if [ -n "${MOBILE_QA_PROJECT_ROOT:-}" ]; then PROJECT_ROOT="$MOBILE_QA_PROJECT_ROOT"; return 0; fi
+  local d; d="$(pwd -P)"
+  while [ "$d" != "/" ]; do
+    [ -f "$d/package.json" ] && { PROJECT_ROOT="$d"; return 0; }
+    d="$(dirname "$d")"
+  done
+  PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
+}
+
+resolve_config_paths() {
+  CFG_LOCAL="$PROJECT_ROOT/.claude/mobile-qa.local.json"
+  CFG_MAIN="${MOBILE_QA_CONFIG:-$PROJECT_ROOT/.claude/mobile-qa.config.json}"
+}
+
+cfg_scalar() {
+  python3 - "$1" "$CFG_LOCAL" "$CFG_MAIN" <<'PY' 2>/dev/null || return 1
+import json, os, sys
+parts = sys.argv[1].split('.')
+for path in sys.argv[2:]:
+    if not path or not os.path.isfile(path):
+        continue
+    try:
+        data = json.load(open(path))
+    except Exception:
+        continue
+    cur, ok = data, True
+    for p in parts:
+        if isinstance(cur, dict) and p in cur:
+            cur = cur[p]
+        else:
+            ok = False
+            break
+    if ok and cur is not None and not isinstance(cur, (list, dict)):
+        print(cur)
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
+# cfg <dotted.key> <ENV_NAME> [default]
+cfg() {
+  local key="$1" env_name="$2" fallback="${3-}" v=""
+  v="$(eval "printf '%s' \"\${$env_name:-}\"")"
+  [ -n "$v" ] && { printf '%s' "$v"; return 0; }
+  v="$(cfg_scalar "$key")" && { printf '%s' "$v"; return 0; }
+  printf '%s' "$fallback"
+}
+
+config_error() {
+  fail "$1"
+  [ -n "${2:-}" ] && log "       add '$2' to $CFG_MAIN"
+  PREFLIGHT_RESULT=CONFIG_ERROR
+  print_summary
+  exit "$EX_CONFIG"
+}
+
+load_config() {
+  step "config"
+  if [ ! -f "$CFG_MAIN" ]; then
+    fail "no config at $CFG_MAIN"
+    log "       copy the example and edit it for this project:"
+    log "         mkdir -p \"$PROJECT_ROOT/.claude/mobile-qa\""
+    log "         cp <plugin>/examples/mobile-qa.config.json \"$CFG_MAIN\""
+    PREFLIGHT_RESULT=CONFIG_ERROR
+    print_summary
+    exit "$EX_CONFIG"
+  fi
+  if ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$CFG_MAIN" 2>/dev/null; then
+    config_error "$CFG_MAIN is not valid JSON"
+  fi
+  ok "config: $CFG_MAIN"
+  [ -f "$CFG_LOCAL" ] && ok "secrets file present: $CFG_LOCAL (contents never printed)"
+
+  METRO_PORT="$(cfg 'metro.port' 'MOBILE_QA_METRO_PORT' '8081')"
+  METRO_START_CMD="$(cfg 'metro.startCommand' 'MOBILE_QA_METRO_START_CMD' 'npm start')"
+  case "$METRO_PORT" in ''|*[!0-9]*) config_error "metro.port '$METRO_PORT' is not a number" 'metro.port' ;; esac
+
+  IOS_APP="$(cfg 'agentDevice.ios.app' 'MOBILE_QA_IOS_APP' '')"
+  IOS_DEVICE="$(cfg 'agentDevice.ios.device' 'MOBILE_QA_IOS_DEVICE' '')"
+  ANDROID_APP="$(cfg 'agentDevice.android.app' 'MOBILE_QA_ANDROID_APP' '')"
+  ANDROID_DEVICE="$(cfg 'agentDevice.android.device' 'MOBILE_QA_ANDROID_DEVICE' '')"
+
+  # Back-compat with the pre-agent-device config schema. Warn rather than fail:
+  # the old keys named the same things under ios.* / android.*. Device pins are
+  # NOT carried over - a hardcoded simulator UDID is exactly the kind of quirk
+  # that now belongs to agent-device's own target selection.
+  local legacy=0
+  if [ -z "$IOS_APP" ]; then
+    IOS_APP="$(cfg 'ios.bundleId' 'MOBILE_QA_IOS_BUNDLE_ID' '')"
+    [ -n "$IOS_APP" ] && legacy=1
+  fi
+  if [ -z "$ANDROID_APP" ]; then
+    ANDROID_APP="$(cfg 'android.package' 'MOBILE_QA_ANDROID_PACKAGE' '')"
+    [ -n "$ANDROID_APP" ] && legacy=1
+  fi
+  if [ "$legacy" -eq 1 ]; then
+    warn "config uses the legacy schema (ios.bundleId / android.package)."
+    warn "  migrate to: agentDevice.ios.app / agentDevice.android.app"
+    warn "  see <plugin>/examples/mobile-qa.config.json"
+  fi
+
+  [ "$WANT_IOS" -eq 1 ] && [ -z "$IOS_APP" ] && \
+    config_error "ios requested but agentDevice.ios.app is empty" 'agentDevice.ios.app'
+  [ "$WANT_ANDROID" -eq 1 ] && [ -z "$ANDROID_APP" ] && \
+    config_error "android requested but agentDevice.android.app is empty" 'agentDevice.android.app'
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# driver (node + pinned agent-device)
+# ---------------------------------------------------------------------------
+check_driver() {
+  step "driver (node + pinned agent-device)"
+  if [ ! -x "$DEVICE_BIN" ]; then
+    fail "mobile-qa-device launcher not found at $DEVICE_BIN"
+    IOS_FIX="reinstall the mobile-qa plugin"; ANDROID_FIX="$IOS_FIX"
+    return 1
+  fi
+  local out rc=0
+  out="$("$DEVICE_BIN" --resolve 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "no usable Node or no agent-device at the pinned version"
+    log "$out"
+    IOS_FIX="$(oneline "$(printf '%s' "$out" | grep -E '^\s{2,}(export|npm i|nvm|fnm|brew)' | head -1)")"
+    [ -z "$IOS_FIX" ] && IOS_FIX="see stderr: mobile-qa-device --resolve"
+    ANDROID_FIX="$IOS_FIX"
+    return 1
+  fi
+  NODE_VERSION="$(printf '%s' "$out" | sed -n 's/^NODE_VERSION=//p')"
+  DRIVER_VERSION="$(printf '%s' "$out" | sed -n 's/^DRIVER_VERSION=//p')"
+  DRIVER_SOURCE="$(printf '%s' "$out" | sed -n 's/^DRIVER_SOURCE=//p')"
+  ok "node $NODE_VERSION"
+  ok "agent-device $DRIVER_VERSION via $DRIVER_SOURCE"
+
+  # Does a bare `agent-device` on PATH resolve to something else? That means the
+  # official skill's verbatim commands would run an unpinned build.
+  local g gv
+  g="$(command -v agent-device 2>/dev/null || true)"
+  if [ -n "$g" ]; then
+    case "$(cd "$(dirname "$g")" && pwd -P)" in
+      "$SELF_DIR") ok "bare 'agent-device' resolves to this plugin's pinned shim" ;;
+      *)
+        gv="$("$g" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+        if [ "$gv" = "$DRIVER_VERSION" ]; then
+          ok "bare 'agent-device' is $g at $gv - same as the pin"
+        else
+          warn "bare 'agent-device' resolves to $g at ${gv:-unknown}, NOT the pinned $DRIVER_VERSION"
+          warn "  use 'mobile-qa-device ...' explicitly, or put the plugin bin dir first on PATH"
+        fi
+        ;;
+    esac
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# metro
+# ---------------------------------------------------------------------------
+metro_probe() {
+  local body rc=0
+  body="$(curl -s -m 4 "http://127.0.0.1:$METRO_PORT/status" 2>/dev/null | tr -d '\r\n')" || rc=$?
+  METRO_PID="$(lsof -nP -iTCP:"$METRO_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
+  if [ "$rc" -eq 0 ] && printf '%s' "$body" | grep -q 'packager-status:running'; then return 0; fi
+  [ -n "$METRO_PID" ] && return 2
+  return 1
+}
+
+check_metro() {
+  step "metro (port $METRO_PORT)"
+  local rc=0
+  metro_probe || rc=$?
+
+  if [ "$rc" -eq 0 ]; then
+    METRO_STATE="UP"; ok "Metro serving on $METRO_PORT (pid ${METRO_PID:-unknown})"; return 0
+  fi
+  if [ "$rc" -eq 2 ]; then
+    METRO_STATE="PORT_BUSY_NOT_METRO"
+    fail "pid $METRO_PID holds port $METRO_PORT but /status is not Metro"
+    log "       kill $METRO_PID, or set metro.port"
+    return 1
+  fi
+  if [ "$START_METRO" -eq 0 ]; then
+    METRO_STATE="DOWN"
+    fail "Metro is not running on port $METRO_PORT"
+    log "       start it:   cd $PROJECT_ROOT && $METRO_START_CMD"
+    log "       or re-run:  $SCRIPT_NAME <platform> --start-metro"
+    return 1
+  fi
+
+  local logfile="${TMPDIR:-/tmp}/mobile-qa-metro-$$.log"
+  warn "starting Metro in the background: $METRO_START_CMD   (log: $logfile)"
+  ( cd "$PROJECT_ROOT" && nohup sh -c "$METRO_START_CMD" >"$logfile" 2>&1 & echo $! >"${logfile}.pid" ) || true
+  local waited=0
+  while [ "$waited" -lt 120 ]; do
+    rc=0; metro_probe || rc=$?
+    [ "$rc" -eq 0 ] && { METRO_STATE="STARTED"; ok "Metro came up on $METRO_PORT"; return 0; }
+    sleep 2; waited=$((waited + 2))
+  done
+  METRO_STATE="DOWN"
+  fail "Metro did not come up within 120s - see $logfile"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# device / app readiness -> agent-device doctor
+# ---------------------------------------------------------------------------
+# NOTE: the exact stdout shape of `agent-device doctor` is version-specific and
+# is NOT parsed here. Only its exit code is treated as a contract; the text is
+# echoed for the human and summarised into *_FIX. If a future version changes
+# its output, this keeps working.
+run_doctor() {
+  local platform="$1" app="$2" device="$3"
+  local args=(doctor --platform "$platform")
+  [ -n "$app" ] && args+=(--app "$app")
+  [ -n "$device" ] && args+=(--device "$device")
+
+  step "$platform readiness (agent-device doctor)"
+  vlog "mobile-qa-device ${args[*]}"
+
+  local out rc=0 tmp
+  tmp="$(mktemp)"
+  ( "$DEVICE_BIN" "${args[@]}" >"$tmp" 2>&1 ) & local pid=$! waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$DOCTOR_TIMEOUT" ]; then
+      kill -TERM "$pid" 2>/dev/null || true; sleep 1; kill -KILL "$pid" 2>/dev/null || true
+      rc=124; break
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+  [ "$rc" -eq 0 ] && { wait "$pid" || rc=$?; }
+  out="$(cat "$tmp")"; rm -f "$tmp"
+  printf '%s\n' "$out" | sed 's/^/  | /' >&2
+
+  if [ "$rc" -eq 124 ]; then
+    printf 'BLOCKED|doctor timed out after %ss - re-run: mobile-qa-device doctor --platform %s' "$DOCTOR_TIMEOUT" "$platform"
+    return 0
+  fi
+  if [ "$rc" -ne 0 ]; then
+    printf 'BLOCKED|%s' "$(oneline "$(printf '%s' "$out" | grep -iE 'error|not found|no (booted|connected|device)|missing|install' | head -2)")"
+    return 0
+  fi
+  printf 'READY|'
+  return 0
+}
+
+do_platform() {
+  local platform="$1" app="$2" device="$3" r status detail
+  r="$(run_doctor "$platform" "$app" "$device")"
+  status="${r%%|*}"; detail="${r#*|}"
+  if [ "$status" = "READY" ]; then
+    ok "$platform ready ($app)"
+  else
+    fail "$platform not ready: ${detail:-see doctor output above}"
+    detail="mobile-qa-device doctor --platform $platform${app:+ --app $app}"
+  fi
+  case "$platform" in
+    ios)     IOS_STATUS="$status";     IOS_FIX="$detail" ;;
+    android) ANDROID_STATUS="$status"; ANDROID_FIX="$detail" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+print_summary() {
+  printf '=== MOBILE-QA-PREFLIGHT-SUMMARY ===\n'
+  printf 'PREFLIGHT_RESULT=%s\n' "$PREFLIGHT_RESULT"
+  printf 'NODE_VERSION=%s\n'     "$NODE_VERSION"
+  printf 'DRIVER_VERSION=%s\n'   "$DRIVER_VERSION"
+  printf 'DRIVER_SOURCE=%s\n'    "$DRIVER_SOURCE"
+  printf 'METRO=%s\n'            "$METRO_STATE"
+  printf 'IOS_STATUS=%s\n'       "$IOS_STATUS"
+  printf 'IOS_FIX=%s\n'          "$(oneline "$IOS_FIX")"
+  printf 'ANDROID_STATUS=%s\n'   "$ANDROID_STATUS"
+  printf 'ANDROID_FIX=%s\n'      "$(oneline "$ANDROID_FIX")"
+  printf '=== END-SUMMARY ===\n'
+}
+
+main() {
+  local target=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      ios|android|all) target="$1" ;;
+      --start-metro)   START_METRO=1 ;;
+      --timeout)       shift; DOCTOR_TIMEOUT="${1:-90}" ;;
+      -v|--verbose)    VERBOSE=1 ;;
+      -h|--help)       usage; exit 0 ;;
+      *) log "error: unknown argument '$1'"; usage >&2; exit "$EX_USAGE" ;;
+    esac
+    shift
+  done
+  [ -z "$target" ] && target="all"
+  case "$target" in
+    ios)     WANT_IOS=1 ;;
+    android) WANT_ANDROID=1 ;;
+    all)     WANT_IOS=1; WANT_ANDROID=1 ;;
+  esac
+
+  resolve_project_root
+  resolve_config_paths
+  load_config
+
+  if ! check_driver; then
+    [ "$WANT_IOS" -eq 1 ] && IOS_STATUS="BLOCKED"
+    [ "$WANT_ANDROID" -eq 1 ] && ANDROID_STATUS="BLOCKED"
+    PREFLIGHT_RESULT=BLOCKED
+    print_summary
+    exit "$EX_BLOCKED"
+  fi
+
+  local metro_ok=1
+  check_metro || metro_ok=0
+
+  [ "$WANT_IOS" -eq 1 ]     && do_platform ios "$IOS_APP" "$IOS_DEVICE"
+  [ "$WANT_ANDROID" -eq 1 ] && do_platform android "$ANDROID_APP" "$ANDROID_DEVICE"
+
+  local ready=0 asked=0
+  for s in "$IOS_STATUS" "$ANDROID_STATUS"; do
+    [ "$s" = "NOT_REQUESTED" ] && continue
+    asked=$((asked + 1))
+    [ "$s" = "READY" ] && ready=$((ready + 1))
+  done
+
+  if [ "$metro_ok" -eq 0 ] || [ "$ready" -eq 0 ]; then
+    PREFLIGHT_RESULT=BLOCKED; print_summary; exit "$EX_BLOCKED"
+  fi
+  if [ "$ready" -lt "$asked" ]; then
+    PREFLIGHT_RESULT=DEGRADED; print_summary; exit "$EX_DEGRADED"
+  fi
+  PREFLIGHT_RESULT=OK; print_summary; exit "$EX_OK"
+}
+
+main "$@"

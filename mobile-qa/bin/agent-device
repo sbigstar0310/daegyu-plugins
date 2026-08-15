@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+#
+# agent-device - shim.
+#
+# The official Callstack skill writes its commands as bare `agent-device ...`.
+# This plugin must not run an unpinned build, so while the plugin is enabled its
+# bin/ directory provides `agent-device` and forwards to the pinned launcher.
+#
+# Consequences, stated plainly:
+#   - If Claude Code PREPENDS plugin bin/ to PATH, a global agent-device is
+#     shadowed for the duration of the session. That is deliberate.
+#   - If it APPENDS, a global agent-device wins and you are NOT pinned. Run
+#     `mobile-qa-preflight` (or `mobile-qa-device --resolve`) - it reports the
+#     binary actually resolved and fails loudly on a version mismatch.
+#
+# `mobile-qa-device` is the unambiguous name and is never shadowed. Prefer it in
+# anything you write down.
+set -euo pipefail
+exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/mobile-qa-device" "$@"

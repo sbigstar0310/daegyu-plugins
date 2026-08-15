@@ -1,0 +1,51 @@
+{
+  "_comment": "EXAMPLE — SRR(스르륵) 앱 기준으로 채운 샘플. 실제 사용 시 이 파일을 $PROJECT_ROOT/.claude/mobile-qa.config.json 으로 복사하고 값을 프로젝트에 맞게 고친다. 이 파일은 커밋되는 비민감 설정이며 자격증명을 담지 않는다.",
+
+  "metro": {
+    "port": 8081
+  },
+
+  "ios": {
+    "bundleId": "com.valuecruncher.SleepyValueCruncher",
+    "simulatorUdid": "567024AB-12D5-4656-A117-0373D1D1E6E7",
+    "simulatorName": "iPhone 17 Pro",
+    "installCommand": "npx expo run:ios --device 567024AB-12D5-4656-A117-0373D1D1E6E7"
+  },
+
+  "android": {
+    "package": "com.valuecruncher.SleepyValueCruncher",
+    "serial": "",
+    "installCommand": "npx expo run:android"
+  },
+
+  "auth": {
+    "strategy": "email-password",
+
+    "testIds": {
+      "email": "email-input",
+      "password": "password-input",
+      "submit": "login-next-btn"
+    },
+
+    "_loggedInMarkers_comment": "notification-btn is a testID on the post-login StarScreen header — language-independent, so it is the reliable signal. Tab labels are belt-and-braces for both locales; note the Korean label is '나의 수면' (shared/i18n/locales/ko.json -> tabs.mySleep), not '내수면'.",
+    "loggedInMarkers": ["notification-btn", "별", "나의 수면", "마이", "Star", "Sleep", "My"],
+
+    "loggedOutMarkers": ["email-input", "kakao-login-btn", "log-in-link", "sign-up-link"],
+
+    "_loginEntryMarkers_comment": "REQUIRED whenever loggedOutMarkers describes a landing screen that has no credential fields. On SRR's InitialScreen the user must tap 'log-in-link' before email-input exists. The Android login script deliberately refuses to tap any button that is not listed here, so that it never starts the Kakao OAuth flow by accident.",
+    "loginEntryMarkers": ["log-in-link"],
+
+    "_errorMarkers_comment": "Inline errors from EmailLoginScreen when Firebase rejects the credentials (shared/i18n/locales/ko.json -> emailLoginScreen.*). Presence of any means 'credentials rejected' (exit 7) rather than 'still waiting' (exit 8). UNVERIFIED against a real uiautomator dump — confirm exact strings on the first real run.",
+    "errorMarkers": [
+      "존재하지 않는 이메일입니다.",
+      "비밀번호가 잘못되었습니다.",
+      "이메일 또는 비밀번호가 잘못되었습니다.",
+      "이메일 주소 형식이 잘못되었습니다."
+    ]
+  },
+
+  "quirks": {
+    "androidImePackage": "com.google.android.inputmethod.latin",
+    "dismissLogBox": true
+  }
+}

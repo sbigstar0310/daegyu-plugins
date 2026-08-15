@@ -1,0 +1,370 @@
+#!/usr/bin/env bash
+#
+# mobile-qa-device - run the pinned agent-device CLI.
+#
+# Everything this plugin does on a device goes through here. It exists for two
+# reasons and no others:
+#
+#   1. Version pin. agent-device is pre-1.0 and ships breaking changes inside
+#      patch ranges (0.20.4 was a broken tarball fixed the same day; 0.20.0
+#      removed gesture positionals and expired ref frames). An ambient global
+#      or @latest means the skills in this plugin describe a CLI you are not
+#      running. The allowed range lives in ../agent-device.pin.json.
+#
+#   2. Node floor. agent-device declares engines.node >= 22.12 but npx does not
+#      enforce it, so a Node 20 host fails later, deeper, and less clearly.
+#      This wrapper finds a good enough Node or tells you exactly what to do.
+#
+# Usage:
+#   mobile-qa-device <any agent-device args...>
+#   mobile-qa-device --resolve        # print the resolution report, run nothing
+#   mobile-qa-device --resolve --json # same, machine readable
+#
+# Env overrides:
+#   MOBILE_QA_AGENT_DEVICE_BIN   absolute path to an agent-device binary to use
+#   MOBILE_QA_NODE_BIN           absolute path to a node >= 22.12
+#   MOBILE_QA_AGENT_DEVICE_NPX   0 to forbid the npx fallback (default 1)
+#   MOBILE_QA_DEVICE_REFRESH     1 to ignore the cached resolution
+#
+# Exit codes:
+#   0   agent-device ran (its own exit code is passed through)
+#   3   no usable Node
+#   4   no usable agent-device at the pinned version
+#   5   pin file missing or unreadable
+set -euo pipefail
+
+SCRIPT_NAME="$(basename "$0")"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+PIN_FILE="${MOBILE_QA_PIN_FILE:-$SELF_DIR/../agent-device.pin.json}"
+
+EX_NODE=3
+EX_DRIVER=4
+EX_PIN=5
+
+err() { printf '%s\n' "$*" >&2; }
+
+need_python() {
+  command -v python3 >/dev/null 2>&1 || {
+    err "$SCRIPT_NAME: python3 is required to read the version pin ($PIN_FILE)."
+    exit "$EX_PIN"
+  }
+}
+
+# ---------------------------------------------------------------------------
+# pin
+# ---------------------------------------------------------------------------
+PIN_GOOD=""; PIN_MIN=""; PIN_MAX=""; PIN_NODE_MIN=""; PIN_ROLLBACK=""
+
+load_pin() {
+  need_python
+  [ -f "$PIN_FILE" ] || {
+    err "$SCRIPT_NAME: version pin file not found: $PIN_FILE"
+    err "  This plugin refuses to run an unpinned agent-device."
+    exit "$EX_PIN"
+  }
+  local out
+  out="$(python3 - "$PIN_FILE" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception as exc:
+    print("ERR=%s" % exc); raise SystemExit(0)
+for k, v in (("PIN_GOOD", "knownGoodVersion"), ("PIN_MIN", "minVersion"),
+             ("PIN_MAX", "maxVersion"), ("PIN_NODE_MIN", "nodeMin"),
+             ("PIN_ROLLBACK", "rollbackTo")):
+    print("%s=%s" % (k, d.get(v, "")))
+PY
+)"
+  case "$out" in
+    ERR=*|"") err "$SCRIPT_NAME: could not parse $PIN_FILE"; exit "$EX_PIN" ;;
+  esac
+  eval "$out"
+  [ -n "$PIN_GOOD" ] || { err "$SCRIPT_NAME: knownGoodVersion missing in $PIN_FILE"; exit "$EX_PIN"; }
+  [ -n "$PIN_NODE_MIN" ] || PIN_NODE_MIN="22.12.0"
+}
+
+# semver_ge <a> <b>  -> 0 when a >= b
+semver_ge() {
+  python3 - "$1" "$2" <<'PY'
+import re, sys
+def parse(v):
+    v = (v or "").strip().lstrip("v").split("-")[0]
+    parts = re.split(r"[.]", v)
+    out = []
+    for p in parts[:3]:
+        m = re.match(r"\d+", p or "")
+        out.append(int(m.group()) if m else 0)
+    while len(out) < 3:
+        out.append(0)
+    return tuple(out)
+sys.exit(0 if parse(sys.argv[1]) >= parse(sys.argv[2]) else 1)
+PY
+}
+
+in_pinned_range() {
+  local v="$1"
+  semver_ge "$v" "${PIN_MIN:-$PIN_GOOD}" || return 1
+  if [ -n "$PIN_MAX" ]; then semver_ge "$PIN_MAX" "$v" || return 1; fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# node
+# ---------------------------------------------------------------------------
+NODE_BIN=""; NODE_VERSION=""; NODE_SOURCE=""
+
+node_version_of() { "$1" -v 2>/dev/null | head -1; }
+
+try_node() {
+  local cand="$1" src="$2" v
+  [ -n "$cand" ] && [ -x "$cand" ] || return 1
+  v="$(node_version_of "$cand")" || return 1
+  [ -n "$v" ] || return 1
+  semver_ge "$v" "$PIN_NODE_MIN" || return 1
+  NODE_BIN="$cand"; NODE_VERSION="$v"; NODE_SOURCE="$src"
+  return 0
+}
+
+resolve_node() {
+  if [ -n "${MOBILE_QA_NODE_BIN:-}" ]; then
+    try_node "$MOBILE_QA_NODE_BIN" "MOBILE_QA_NODE_BIN" && return 0
+    err "$SCRIPT_NAME: MOBILE_QA_NODE_BIN=$MOBILE_QA_NODE_BIN is not a node >= $PIN_NODE_MIN"
+  fi
+
+  local p
+  p="$(command -v node 2>/dev/null || true)"
+  try_node "$p" "PATH" && return 0
+
+  # nvm: read the install dir directly, no shell sourcing required.
+  local nvm_dir="${NVM_DIR:-$HOME/.nvm}" c
+  if [ -d "$nvm_dir/versions/node" ]; then
+    # highest version first
+    while IFS= read -r c; do
+      try_node "$c/bin/node" "nvm ($(basename "$c"))" && return 0
+    done < <(find "$nvm_dir/versions/node" -maxdepth 1 -mindepth 1 -type d 2>/dev/null \
+             | sort -t. -k1,1V -r)
+  fi
+
+  # fnm / volta / asdf, best effort
+  if command -v fnm >/dev/null 2>&1; then
+    while IFS= read -r c; do
+      try_node "$c/installation/bin/node" "fnm" && return 0
+    done < <(find "${FNM_DIR:-$HOME/.local/share/fnm}/node-versions" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort -V -r)
+  fi
+  if command -v volta >/dev/null 2>&1; then
+    p="$(volta which node 2>/dev/null || true)"
+    try_node "$p" "volta" && return 0
+  fi
+  if [ -d "$HOME/.asdf/installs/nodejs" ]; then
+    while IFS= read -r c; do
+      try_node "$c/bin/node" "asdf" && return 0
+    done < <(find "$HOME/.asdf/installs/nodejs" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort -V -r)
+  fi
+
+  return 1
+}
+
+node_failure() {
+  local cur; cur="$(node -v 2>/dev/null || echo 'not found')"
+  err ""
+  err "=========================================================================="
+  err " BLOCKED: agent-device needs Node >= $PIN_NODE_MIN and this shell has $cur"
+  err "=========================================================================="
+  err ""
+  err " Nothing was run. Pick one:"
+  err ""
+  err "   nvm:   nvm install 22.12 && nvm use 22.12"
+  err "   fnm:   fnm install 22.12 && fnm use 22.12"
+  err "   brew:  brew install node@22"
+  err ""
+  err " Or point this plugin at a Node you already have, without changing the"
+  err " shell default:"
+  err ""
+  err "   export MOBILE_QA_NODE_BIN=/absolute/path/to/node   # node -v >= v$PIN_NODE_MIN"
+  err ""
+  if [ -d "${NVM_DIR:-$HOME/.nvm}/versions/node" ]; then
+    err " nvm versions installed on this machine:"
+    find "${NVM_DIR:-$HOME/.nvm}/versions/node" -maxdepth 1 -mindepth 1 -type d -exec basename {} \; 2>/dev/null \
+      | sort -V | sed 's/^/   /' >&2
+    err ""
+  fi
+  err " Report this as BLOCKED. Do not work around it."
+  err ""
+}
+
+# ---------------------------------------------------------------------------
+# agent-device
+# ---------------------------------------------------------------------------
+AD_MODE=""      # bin | npx
+AD_PATH=""      # binary path when AD_MODE=bin
+AD_VERSION=""
+AD_SOURCE=""
+AD_NOTES=""
+
+note() { AD_NOTES="${AD_NOTES}${AD_NOTES:+; }$1"; }
+
+ad_version_of() {
+  # $1 = binary path
+  "$NODE_BIN" "$1" --version 2>/dev/null | tr -d '\r' | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1
+}
+
+try_bin() {
+  local cand="$1" src="$2" v real
+  [ -n "$cand" ] && [ -e "$cand" ] || return 1
+  real="$(cd "$(dirname "$cand")" 2>/dev/null && pwd -P)/$(basename "$cand")" || return 1
+  # never recurse into our own shim
+  case "$real" in "$SELF_DIR"/*) return 1 ;; esac
+  v="$(ad_version_of "$real")" || return 1
+  [ -n "$v" ] || return 1
+  if ! in_pinned_range "$v"; then
+    note "rejected $src ($real) at $v - outside pinned range ${PIN_MIN:-$PIN_GOOD}..${PIN_MAX:-$PIN_GOOD}"
+    return 1
+  fi
+  AD_MODE="bin"; AD_PATH="$real"; AD_VERSION="$v"; AD_SOURCE="$src"
+  return 0
+}
+
+resolve_driver() {
+  if [ -n "${MOBILE_QA_AGENT_DEVICE_BIN:-}" ]; then
+    if try_bin "$MOBILE_QA_AGENT_DEVICE_BIN" "MOBILE_QA_AGENT_DEVICE_BIN"; then return 0; fi
+    err "$SCRIPT_NAME: MOBILE_QA_AGENT_DEVICE_BIN is set but unusable (see notes below)."
+  fi
+
+  local root; root="$(project_root)"
+  try_bin "$root/node_modules/agent-device/bin/agent-device.mjs" "project node_modules" && return 0
+  try_bin "$root/node_modules/.bin/agent-device" "project node_modules/.bin" && return 0
+
+  # A global install is accepted ONLY if it is already at the pinned version.
+  local g; g="$(command -v agent-device 2>/dev/null || true)"
+  if [ -n "$g" ]; then
+    try_bin "$g" "global PATH" && return 0
+  fi
+
+  if [ "${MOBILE_QA_AGENT_DEVICE_NPX:-1}" = "0" ]; then
+    note "npx fallback disabled by MOBILE_QA_AGENT_DEVICE_NPX=0"
+    return 1
+  fi
+  command -v npx >/dev/null 2>&1 || { note "npx not found"; return 1; }
+  AD_MODE="npx"; AD_VERSION="$PIN_GOOD"; AD_SOURCE="npx agent-device@$PIN_GOOD"
+  return 0
+}
+
+driver_failure() {
+  err ""
+  err "=========================================================================="
+  err " BLOCKED: no agent-device at the pinned version ${PIN_MIN:-$PIN_GOOD}..${PIN_MAX:-$PIN_GOOD}"
+  err "=========================================================================="
+  err ""
+  [ -n "$AD_NOTES" ] && { err " notes: $AD_NOTES"; err ""; }
+  err " Fix one of these, then re-run:"
+  err ""
+  err "   project-local install (preferred, lockfile-pinned):"
+  err "     npm i -D agent-device@$PIN_GOOD"
+  err ""
+  err "   or point at a binary you already have:"
+  err "     export MOBILE_QA_AGENT_DEVICE_BIN=/absolute/path/to/agent-device"
+  err ""
+  err "   or allow the pinned npx fallback:"
+  err "     unset MOBILE_QA_AGENT_DEVICE_NPX"
+  err ""
+  err " A global agent-device is used only when its --version already equals the"
+  err " pin. A different global version is ignored on purpose: the skills and the"
+  err " CLI must describe the same build. Pin file: $PIN_FILE"
+  err ""
+}
+
+project_root() {
+  if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then printf '%s' "$CLAUDE_PROJECT_DIR"; return; fi
+  if [ -n "${MOBILE_QA_PROJECT_ROOT:-}" ]; then printf '%s' "$MOBILE_QA_PROJECT_ROOT"; return; fi
+  local d; d="$(pwd -P)"
+  while [ "$d" != "/" ]; do
+    [ -f "$d/package.json" ] && { printf '%s' "$d"; return; }
+    d="$(dirname "$d")"
+  done
+  git rev-parse --show-toplevel 2>/dev/null || pwd -P
+}
+
+# ---------------------------------------------------------------------------
+# resolution cache (a version probe per command is too slow otherwise)
+# ---------------------------------------------------------------------------
+CACHE_FILE=""
+CACHE_TTL_SECONDS=43200   # 12h
+
+cache_path() { printf '%s/mobile-qa-device-resolve-%s.env' "${TMPDIR:-/tmp}" "$PIN_GOOD"; }
+
+cache_read() {
+  [ "${MOBILE_QA_DEVICE_REFRESH:-0}" = "1" ] && return 1
+  [ -f "$CACHE_FILE" ] || return 1
+  python3 - "$CACHE_FILE" "$CACHE_TTL_SECONDS" <<'PY' || return 1
+import os, sys, time
+p, ttl = sys.argv[1], int(sys.argv[2])
+sys.exit(0 if (time.time() - os.path.getmtime(p)) < ttl else 1)
+PY
+  # shellcheck disable=SC1090
+  . "$CACHE_FILE" || return 1
+  [ -n "${AD_MODE:-}" ] && [ -n "${NODE_BIN:-}" ] || return 1
+  [ -x "$NODE_BIN" ] || return 1
+  if [ "$AD_MODE" = "bin" ] && [ ! -e "$AD_PATH" ]; then return 1; fi
+  return 0
+}
+
+cache_write() {
+  { printf 'NODE_BIN=%q\n' "$NODE_BIN"
+    printf 'NODE_VERSION=%q\n' "$NODE_VERSION"
+    printf 'NODE_SOURCE=%q\n' "$NODE_SOURCE"
+    printf 'AD_MODE=%q\n' "$AD_MODE"
+    printf 'AD_PATH=%q\n' "$AD_PATH"
+    printf 'AD_VERSION=%q\n' "$AD_VERSION"
+    printf 'AD_SOURCE=%q\n' "$AD_SOURCE"
+  } >"$CACHE_FILE" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+main() {
+  load_pin
+  CACHE_FILE="$(cache_path)"
+
+  local want_resolve=0 want_json=0
+  if [ "${1:-}" = "--resolve" ]; then
+    want_resolve=1; shift
+    [ "${1:-}" = "--json" ] && { want_json=1; shift; }
+  fi
+
+  if ! cache_read; then
+    resolve_node || { node_failure; exit "$EX_NODE"; }
+    resolve_driver || { driver_failure; exit "$EX_DRIVER"; }
+    cache_write
+  fi
+
+  if [ "$want_resolve" -eq 1 ]; then
+    if [ "$want_json" -eq 1 ]; then
+      python3 - "$NODE_BIN" "$NODE_VERSION" "$NODE_SOURCE" "$AD_MODE" "$AD_PATH" \
+                "$AD_VERSION" "$AD_SOURCE" "$PIN_GOOD" "$PIN_MIN" "$PIN_MAX" <<'PY'
+import json, sys
+k = ["nodeBin","nodeVersion","nodeSource","driverMode","driverPath",
+     "driverVersion","driverSource","pinKnownGood","pinMin","pinMax"]
+print(json.dumps(dict(zip(k, sys.argv[1:])), indent=2))
+PY
+    else
+      printf 'NODE_BIN=%s\n'          "$NODE_BIN"
+      printf 'NODE_VERSION=%s\n'      "$NODE_VERSION"
+      printf 'NODE_SOURCE=%s\n'       "$NODE_SOURCE"
+      printf 'DRIVER_MODE=%s\n'       "$AD_MODE"
+      printf 'DRIVER_PATH=%s\n'       "${AD_PATH:-}"
+      printf 'DRIVER_VERSION=%s\n'    "$AD_VERSION"
+      printf 'DRIVER_SOURCE=%s\n'     "$AD_SOURCE"
+      printf 'PIN_KNOWN_GOOD=%s\n'    "$PIN_GOOD"
+      printf 'PIN_RANGE=%s..%s\n'     "${PIN_MIN:-$PIN_GOOD}" "${PIN_MAX:-$PIN_GOOD}"
+    fi
+    exit 0
+  fi
+
+  if [ "$AD_MODE" = "bin" ]; then
+    exec "$NODE_BIN" "$AD_PATH" "$@"
+  fi
+
+  # npx path: keep the resolved node first on PATH so npx spawns the right one
+  PATH="$(dirname "$NODE_BIN"):$PATH" exec npx -y "agent-device@$PIN_GOOD" "$@"
+}
+
+main "$@"

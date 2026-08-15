@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "mobile-qa",
+  "displayName": "Mobile GUI QA (React Native / Expo)",
+  "description": "Parallel iOS + Android GUI QA subagents for any React Native / Expo app, driven by Callstack agent-device (pinned 0.20.8, requires Node >= 22.12). The plugin owns QA policy only - parallel run policy, project configuration, login intent, pass/fail criteria, the report contract, and the learned-facts handoff. Command syntax, session lifecycle, refs, and text entry are deferred to the official agent-device skills and the installed CLI's own version-matched help. App-specific facts (app id, device, testIDs, credentials) are read from the project's .claude/mobile-qa.config.json; the plugin itself is app-independent.",
+  "author": {
+    "name": "sbigstar0310",
+    "email": "sbigstar0930@gmail.com"
+  },
+  "keywords": [
+    "qa",
+    "mobile",
+    "ios",
+    "android",
+    "expo",
+    "react-native",
+    "agent-device",
+    "e2e"
+  ]
+}

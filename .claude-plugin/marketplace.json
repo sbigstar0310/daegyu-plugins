@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "daegyu-plugins",
-  "description": "Personal Claude Code plugins by sbigstar0310 (notion-manager, progress, pptx-deck)",
+  "description": "Personal Claude Code plugins by sbigstar0310 (notion-manager, progress, pptx-deck, mobile-qa)",
   "owner": {
     "name": "sbigstar0310"
   },
@@ -26,6 +26,13 @@
       "author": { "name": "sbigstar0310" },
       "category": "productivity",
       "source": "./pptx-deck"
+    },
+    {
+      "name": "mobile-qa",
+      "description": "Parallel iOS + Android GUI QA subagents for any React Native / Expo app, driven by a pinned Callstack agent-device",
+      "author": { "name": "sbigstar0310" },
+      "category": "testing",
+      "source": "./mobile-qa"
     }
   ]
 }

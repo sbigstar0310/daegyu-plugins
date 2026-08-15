@@ -1,0 +1,74 @@
+{
+  "_comment": "EXAMPLE, filled in for the SRR app. Copy to $PROJECT_ROOT/.claude/mobile-qa.config.json and replace every value. This file is committed and non-sensitive: it must never contain credentials. Keys beginning with _ are comments and are ignored.",
+
+  "_reportLanguage_comment": "Language for report PROSE only. Structural keys (PASS/FAIL/BLOCKED, ### BUG:, ## Learned, and the TYPE|claim|evidence|confidence block) stay English so they remain machine-readable. Default is 'en'; SRR is a Korean project, hence 'ko'.",
+  "reportLanguage": "ko",
+
+  "project": { "name": "srr_rn" },
+
+  "metro": {
+    "port": 8081,
+    "startCommand": "npm start"
+  },
+
+  "_agentDevice_comment": "Target selection for the agent-device driver. 'app' is the bundle id (iOS) or package id (Android). Leave 'device' empty to let agent-device choose the booted/connected device - pin it only when more than one is present, because a hardcoded UDID rots the moment the simulator is recreated. Device QUIRKS are deliberately NOT configured here: coordinate scaling, IME handling and text entry belong to agent-device, not to this plugin.",
+  "agentDevice": {
+    "ios": {
+      "app": "com.valuecruncher.SleepyValueCruncher",
+      "device": ""
+    },
+    "android": {
+      "app": "com.valuecruncher.SleepyValueCruncher",
+      "device": ""
+    }
+  },
+
+  "_build_comment": "Reported to the human when doctor says the app is not installed. NEVER run automatically - a build takes minutes and mutates the working tree.",
+  "build": {
+    "iosCommand": "npx expo run:ios",
+    "androidCommand": "npx expo run:android"
+  },
+
+  "auth": {
+    "strategy": "email-password",
+
+    "testIds": {
+      "email": "email-input",
+      "password": "password-input",
+      "submit": "login-next-btn"
+    },
+
+    "_loggedInMarkers_comment": "testID-only, and deliberately ONE entry. 'notification-btn' is on StarScreen (app/(auth)/StarScreen.tsx), the post-login landing screen, so it is present in the very first snapshot after open. Do NOT add logout-btn / view-usage-btn / language-select-btn: they live on MyScreen (app/(auth)/MyScreen.tsx) and are only reachable after tab navigation, so they are absent from the first snapshot and would make a logged-in session look logged out. The previous text markers ('별', 'Star', 'Sleep', 'My', '나의 수면') were removed - single words collide with onboarding copy and break across locales.",
+    "loggedInMarkers": ["notification-btn"],
+
+    "_loggedOutMarkers_comment": "testID-only. log-in-link and sign-up-link are on InitialScreen (app/InitialScreen.tsx); email-input/password-input/login-next-btn are on EmailLoginScreen. Both screens are logged-out states, which is why entries from each appear here.",
+    "loggedOutMarkers": ["log-in-link", "sign-up-link", "email-input", "password-input", "login-next-btn"],
+
+    "_loginEntryMarkers_comment": "SAFETY FENCE, not a hint. REQUIRED whenever the logged-out landing screen has no credential fields. On SRR's InitialScreen the user must tap 'log-in-link' before email-input exists. The login skills refuse to tap any control not listed here, so the QA run can never accidentally start the Kakao OAuth flow (kakao-login-btn) or account creation (sign-up-link).",
+    "loginEntryMarkers": ["log-in-link"],
+
+    "_errorMarkers_comment": "UNVERIFIED - see the VERIFY ON FIRST RUN block below. These were transcribed from shared/i18n/locales/ko.json (emailLoginScreen.*) and have NEVER been observed in a real snapshot. They exist to distinguish 'credentials rejected' (terminal, do not retry) from 'not processed yet' (retry once). An errorMarker that never matches silently turns a rejection into a retry loop, which is how a test account gets rate-limited or locked out. Text markers are used here only because these inline errors carry no testID; giving them one in app source would be a real improvement.",
+    "errorMarkers": [
+      "존재하지 않는 이메일입니다.",
+      "비밀번호가 잘못되었습니다.",
+      "이메일 또는 비밀번호가 잘못되었습니다.",
+      "이메일 주소 형식이 잘못되었습니다."
+    ]
+  },
+
+  "quirks": {
+    "_dismissLogBox_comment": "Dev-client LogBox red overlay swallows the first tap. Dismissing it is fine, but its presence should still be reported - it usually means the app logged a real error.",
+    "dismissLogBox": true
+  },
+
+  "_VERIFY_ON_FIRST_RUN": [
+    "NOTHING BELOW HAS BEEN CONFIRMED AGAINST A REAL DEVICE SNAPSHOT. Confirm each item on the first run against this app and report every discrepancy as a CORRECTION line in the report's ## Learned block.",
+    "1. loggedInMarkers: open the app in an ALREADY LOGGED-IN state and confirm 'notification-btn' appears in the FIRST snapshot open returns - not after navigating. If it does not, login detection will report a false negative and run a needless login flow.",
+    "2. loggedInMarkers, negative case: confirm 'notification-btn' is ABSENT on the logged-out InitialScreen and on any splash/onboarding screen. A false positive here runs the entire QA pass against the wrong screen, and every later failure gets misattributed to the app.",
+    "3. loggedOutMarkers: confirm log-in-link and sign-up-link are visible on InitialScreen, and that email-input/password-input/login-next-btn are visible on EmailLoginScreen.",
+    "4. errorMarkers: deliberately submit a WRONG PASSWORD ONCE and capture the exact rendered string. Verify it matches one of the four entries character for character, including punctuation and any trailing period. Do this once only - repeated failures risk locking the shared test account. Delete entries that do not match; do not keep aspirational ones.",
+    "5. testIds: confirm agent-device resolves email-input / password-input / login-next-btn as selectors on BOTH platforms. React Native maps testID to different native attributes per platform, so a testID that resolves on iOS may need a different selector form on Android.",
+    "6. agentDevice.*.app: confirm the same id is correct for the build actually installed. Debug/dev-client builds frequently carry a .dev or .debug suffix, in which case doctor will report the app as not installed while it is plainly on screen.",
+    "7. reportLanguage: confirm reports come back in Korean prose while PASS/FAIL/BLOCKED, ### BUG: and ## Learned remain English."
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "mobile-qa",
+  "displayName": "Mobile GUI QA (React Native / Expo)",
+  "version": "0.1.0",
+  "description": "React Native / Expo 앱을 iOS 시뮬레이터와 Android 에뮬레이터에서 GUI 테스트하는 범용 QA 서브에이전트. Mobile MCP 기반. 앱별 사실(bundle ID, UDID, testID, 계정)은 프로젝트의 .claude/mobile-qa.config.json에서 읽고, 플러그인 자체는 앱에 독립적이다.",
+  "author": {
+    "name": "sbigstar0310",
+    "email": "sbigstar0930@gmail.com"
+  },
+  "keywords": [
+    "qa",
+    "mobile",
+    "ios",
+    "android",
+    "expo",
+    "react-native",
+    "mobile-mcp",
+    "e2e"
+  ]
+}

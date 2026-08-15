@@ -1,0 +1,689 @@
+#!/usr/bin/env bash
+#
+# srr-qa-state - report where a React Native / Expo app currently is
+#                (logged in / logged out / not running) on a simulator or emulator.
+#
+# Part of the srr-qa plugin. Project-agnostic: every app-specific value comes
+# from config (see --help).
+#
+set -euo pipefail
+
+SCRIPT_NAME="$(basename "$0")"
+
+# ----------------------------------------------------------------------------
+# Defaults / globals
+# ----------------------------------------------------------------------------
+VERBOSE=0
+PLATFORM=""
+TAKE_SCREENSHOT=1
+TIMEOUT_SECS=25
+OVERRIDE_UDID=""
+OVERRIDE_SERIAL=""
+
+PROJECT_ROOT=""
+CFG_MAIN=""
+CFG_LOCAL=""
+
+# resolved config
+IOS_BUNDLE_ID=""
+IOS_UDID=""
+IOS_DEVICE_NAME=""
+ANDROID_PACKAGE=""
+ANDROID_SERIAL=""
+LOGGED_OUT_MARKERS=()
+LOGGED_IN_MARKERS=()
+
+# emitted summary
+OUT_STATE="UNKNOWN"
+OUT_REASON="NOT_EVALUATED"
+declare -a OUT_EXTRA=()
+
+# exit codes
+EX_LOGGED_IN=0
+EX_USAGE=2
+EX_ENV=3
+EX_CONFIG=4
+EX_LOGGED_OUT=10
+EX_APP_NOT_RUNNING=11
+EX_UNKNOWN=12
+
+# ----------------------------------------------------------------------------
+# Logging
+# ----------------------------------------------------------------------------
+log()  { printf '%s\n' "$*" >&2; }
+vlog() { [ "$VERBOSE" -eq 1 ] && printf '+ %s\n' "$*" >&2 || true; }
+die_usage() { log "error: $*"; log "run '$SCRIPT_NAME --help' for usage"; exit "$EX_USAGE"; }
+
+usage() {
+  cat <<'EOF'
+srr-qa-state - report the app's current login state on a simulator/emulator
+
+USAGE
+  srr-qa-state <ios|android> [options]
+
+OPTIONS
+  -v, --verbose         Echo each underlying command to stderr.
+      --udid UDID       iOS: use this simulator instead of the configured one.
+      --serial SERIAL   Android: use this adb serial instead of the configured one.
+      --no-screenshot   iOS: skip capturing a screenshot.
+      --timeout SECS    Per-command timeout (default 25).
+  -h, --help            Show this help.
+
+OUTPUT CONTRACT
+  stdout is ONLY machine-readable KEY=value lines, one per line, no quoting.
+  stderr carries human-readable detail and verbose command echoes.
+  So `srr-qa-state android 2>/dev/null` yields a clean parseable block.
+
+  Always emitted:
+    STATE=LOGGED_IN|LOGGED_OUT|APP_NOT_RUNNING|UNKNOWN
+    PLATFORM=ios|android
+    REASON=<short machine token, see below>
+
+  Emitted when known:
+    DEVICE=<udid or adb serial>
+    APP_RUNNING=0|1
+    FOREGROUND=0|1          (android only, best effort)
+    EVIDENCE=<attr=value that decided the verdict>
+    SCREENSHOT=<path>       (ios only, when captured)
+    NOTE=<single-line human note>
+
+  REASON tokens:
+    MARKER_MATCH               a configured marker decided the verdict
+    AMBIGUOUS_MARKERS          both logged-in and logged-out markers present
+    NO_MARKERS_MATCHED         UI dumped fine, no configured marker present
+    NO_LOGGED_IN_MARKERS_CFG   auth.loggedInMarkers is empty, cannot confirm login
+    PROCESS_NOT_FOUND          app process is not running
+    IOS_SHELL_DETECTION_LIMIT  iOS: process is up, login state not shell-detectable
+    NO_DEVICE                  no booted simulator / no usable adb device
+    DEVICE_AMBIGUOUS           more than one adb device, none selected
+    TOOL_MISSING               xcrun or adb not on PATH
+    DUMP_FAILED                uiautomator dump failed or produced no XML
+    TIMEOUT                    an underlying command exceeded --timeout
+
+IOS LIMITATION (deliberate)
+  There is no reliable shell-only way to read the iOS view hierarchy here
+  (idb is not usable on this machine). This script therefore reports
+  STATE=UNKNOWN for iOS whenever the app IS running, and captures a screenshot
+  so a caller can look. The calling agent MUST determine login state itself via
+  mobile_list_elements_on_screen. It will not guess.
+  APP_NOT_RUNNING is still reported accurately for iOS.
+
+EXIT CODES
+  0   LOGGED_IN
+  2   usage error
+  3   environment unavailable (no device, tool missing) - STATE=UNKNOWN
+  4   config error (a required key is missing) - nothing emitted on stdout
+  10  LOGGED_OUT
+  11  APP_NOT_RUNNING
+  12  UNKNOWN (detection inconclusive, environment was fine)
+
+CONFIGURATION
+  Resolution order, first hit wins:
+    1. environment variable
+    2. $PROJECT_ROOT/.claude/mobile-qa.local.json   (gitignored, secrets)
+    3. $PROJECT_ROOT/.claude/mobile-qa.config.json  (committed, non-secret)
+    4. built-in default (only where a universal default exists)
+
+  Keys consumed by this script:
+    ios.bundleId          MOBILE_QA_IOS_BUNDLE_ID       (required for ios)
+    ios.simulatorUdid     MOBILE_QA_IOS_UDID            (optional)
+    ios.simulatorName     MOBILE_QA_IOS_DEVICE_NAME     (used when udid is null)
+    android.package       MOBILE_QA_ANDROID_PACKAGE     (required for android)
+    android.serial        MOBILE_QA_ANDROID_SERIAL      (optional)
+    auth.testIds.email|password|submit                  (fallback logged-out markers)
+    auth.loggedOutMarkers                               (array of strings)
+    auth.loggedInMarkers                                (array of strings)
+
+  Other env vars:
+    MOBILE_QA_CONFIG        explicit path to a config json (replaces #3)
+    MOBILE_QA_PROJECT_ROOT  explicit project root
+
+  Markers are matched against every node in the uiautomator dump, against the
+  attributes resource-id, content-desc and text. A resource-id matches if it is
+  equal to the marker or ends with "/<marker>" (React Native surfaces testID
+  differently across versions, so both forms are handled).
+EOF
+}
+
+# ----------------------------------------------------------------------------
+# Timeout helper (macOS has no coreutils `timeout`)
+# ----------------------------------------------------------------------------
+# run_to <secs> <outfile> <cmd...>  -> rc of cmd, or 124 on timeout
+run_to() {
+  local secs="$1" out="$2"; shift 2
+  : >"$out"
+  "$@" >"$out" 2>&1 &
+  local pid=$! ticks=0 max=$((secs * 5)) rc=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$ticks" -ge "$max" ]; then
+      kill -TERM "$pid" 2>/dev/null || true
+      sleep 0.5
+      kill -KILL "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 0.2
+    ticks=$((ticks + 1))
+  done
+  wait "$pid" || rc=$?
+  return "$rc"
+}
+
+# ----------------------------------------------------------------------------
+# Project root + config discovery
+# ----------------------------------------------------------------------------
+resolve_project_root() {
+  if [ -n "${MOBILE_QA_PROJECT_ROOT:-}" ]; then
+    PROJECT_ROOT="$MOBILE_QA_PROJECT_ROOT"
+    return 0
+  fi
+  local d
+  d="$(pwd)"
+  while [ "$d" != "/" ]; do
+    if [ -f "$d/package.json" ]; then PROJECT_ROOT="$d"; return 0; fi
+    d="$(dirname "$d")"
+  done
+  if d="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+    PROJECT_ROOT="$d"; return 0
+  fi
+  PROJECT_ROOT="$(pwd)"
+}
+
+resolve_config_paths() {
+  CFG_LOCAL="$PROJECT_ROOT/.claude/mobile-qa.local.json"
+  if [ -n "${MOBILE_QA_CONFIG:-}" ]; then
+    CFG_MAIN="$MOBILE_QA_CONFIG"
+  else
+    CFG_MAIN="$PROJECT_ROOT/.claude/mobile-qa.config.json"
+  fi
+}
+
+# cfg_scalar <dotted.key> -> prints value, rc 1 if absent
+cfg_scalar() {
+  local key="$1"
+  python3 - "$key" "$CFG_LOCAL" "$CFG_MAIN" <<'PY' 2>/dev/null || return 1
+import json, os, sys
+parts = sys.argv[1].split('.')
+for path in sys.argv[2:]:
+    if not path or not os.path.isfile(path):
+        continue
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except Exception:
+        continue
+    cur = data
+    ok = True
+    for p in parts:
+        if isinstance(cur, dict) and p in cur:
+            cur = cur[p]
+        else:
+            ok = False
+            break
+    if ok and cur is not None and not isinstance(cur, (list, dict)):
+        print(cur)
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
+# cfg_array <dotted.key> -> prints one item per line, rc 1 if absent/not a list
+cfg_array() {
+  local key="$1"
+  python3 - "$key" "$CFG_LOCAL" "$CFG_MAIN" <<'PY' 2>/dev/null || return 1
+import json, os, sys
+parts = sys.argv[1].split('.')
+for path in sys.argv[2:]:
+    if not path or not os.path.isfile(path):
+        continue
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except Exception:
+        continue
+    cur = data
+    ok = True
+    for p in parts:
+        if isinstance(cur, dict) and p in cur:
+            cur = cur[p]
+        else:
+            ok = False
+            break
+    if ok and isinstance(cur, list):
+        for item in cur:
+            if item is None:
+                continue
+            s = str(item).strip()
+            if s:
+                print(s)
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
+# cfg <dotted.key> <ENV_VAR_NAME> [default]
+cfg() {
+  local key="$1" env_name="$2" fallback="${3-}" v=""
+  v="$(eval "printf '%s' \"\${$env_name:-}\"")"
+  if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
+  if v="$(cfg_scalar "$key")"; then printf '%s' "$v"; return 0; fi
+  printf '%s' "$fallback"
+}
+
+config_error() {
+  log "CONFIG ERROR: $1"
+  log "  set config key '$2' in $CFG_MAIN (or $CFG_LOCAL), or export $3"
+  exit "$EX_CONFIG"
+}
+
+load_markers() {
+  local line
+  LOGGED_OUT_MARKERS=()
+  LOGGED_IN_MARKERS=()
+  while IFS= read -r line; do
+    [ -n "$line" ] && LOGGED_OUT_MARKERS+=("$line")
+  done < <(cfg_array "auth.loggedOutMarkers" || true)
+  while IFS= read -r line; do
+    [ -n "$line" ] && LOGGED_IN_MARKERS+=("$line")
+  done < <(cfg_array "auth.loggedInMarkers" || true)
+
+  # Fallback: derive logged-out markers from the configured login testIDs.
+  if [ "${#LOGGED_OUT_MARKERS[@]}" -eq 0 ]; then
+    local k v
+    for k in auth.testIds.email auth.testIds.password auth.testIds.submit; do
+      if v="$(cfg_scalar "$k")"; then
+        [ -n "$v" ] && LOGGED_OUT_MARKERS+=("$v")
+      fi
+    done
+  fi
+}
+
+# ----------------------------------------------------------------------------
+# stdout emission
+# ----------------------------------------------------------------------------
+add_extra() { OUT_EXTRA+=("$1=$2"); }
+
+emit_and_exit() {
+  local state="$1" reason="$2" code="$3"
+  printf 'STATE=%s\n' "$state"
+  printf 'PLATFORM=%s\n' "$PLATFORM"
+  printf 'REASON=%s\n' "$reason"
+  local e
+  for e in ${OUT_EXTRA[@]+"${OUT_EXTRA[@]}"}; do
+    printf '%s\n' "$e"
+  done
+  exit "$code"
+}
+
+# ----------------------------------------------------------------------------
+# iOS
+# ----------------------------------------------------------------------------
+ios_resolve_udid() {
+  if [ -n "$OVERRIDE_UDID" ]; then IOS_UDID="$OVERRIDE_UDID"; return 0; fi
+  IOS_UDID="$(cfg 'ios.simulatorUdid' 'MOBILE_QA_IOS_UDID' '')"
+  if [ -n "$IOS_UDID" ]; then return 0; fi
+
+  IOS_DEVICE_NAME="$(cfg 'ios.simulatorName' 'MOBILE_QA_IOS_DEVICE_NAME' '')"
+  if [ -z "$IOS_DEVICE_NAME" ]; then
+    config_error "no iOS simulator identified" \
+      "ios.simulatorUdid (or ios.simulatorName)" \
+      "MOBILE_QA_IOS_UDID (or MOBILE_QA_IOS_DEVICE_NAME)"
+  fi
+
+  # Prefer a booted device with that name; else the newest-runtime match.
+  local tmp; tmp="$(mktemp)"
+  vlog "xcrun simctl list devices available"
+  if ! run_to "$TIMEOUT_SECS" "$tmp" xcrun simctl list devices available; then
+    rm -f "$tmp"
+    add_extra NOTE "xcrun simctl list devices failed or timed out"
+    emit_and_exit UNKNOWN TIMEOUT "$EX_ENV"
+  fi
+  IOS_UDID="$(python3 - "$IOS_DEVICE_NAME" "$tmp" <<'PY'
+import re, sys
+name, path = sys.argv[1], sys.argv[2]
+booted, any_match = None, None
+with open(path, encoding='utf-8', errors='replace') as fh:
+    for line in fh:
+        m = re.match(r'\s*(.+?)\s+\(([0-9A-Fa-f-]{36})\)\s+\((\w+)\)', line)
+        if not m:
+            continue
+        dev, udid, state = m.group(1).strip(), m.group(2), m.group(3)
+        if dev != name:
+            continue
+        if any_match is None:
+            any_match = udid
+        if state == 'Booted' and booted is None:
+            booted = udid
+print(booted or any_match or '')
+PY
+)"
+  rm -f "$tmp"
+  if [ -z "$IOS_UDID" ]; then
+    add_extra NOTE "no simulator named '$IOS_DEVICE_NAME' found"
+    emit_and_exit UNKNOWN NO_DEVICE "$EX_ENV"
+  fi
+  vlog "resolved simulator '$IOS_DEVICE_NAME' -> $IOS_UDID"
+}
+
+state_ios() {
+  command -v xcrun >/dev/null 2>&1 || {
+    add_extra NOTE "xcrun not found on PATH (Xcode command line tools required)"
+    emit_and_exit UNKNOWN TOOL_MISSING "$EX_ENV"
+  }
+
+  IOS_BUNDLE_ID="$(cfg 'ios.bundleId' 'MOBILE_QA_IOS_BUNDLE_ID' '')"
+  [ -n "$IOS_BUNDLE_ID" ] || config_error "iOS bundle id is not configured" \
+    "ios.bundleId" "MOBILE_QA_IOS_BUNDLE_ID"
+
+  ios_resolve_udid
+  add_extra DEVICE "$IOS_UDID"
+
+  # Booted?
+  local tmp rc=0; tmp="$(mktemp)"
+  vlog "xcrun simctl list devices"
+  run_to "$TIMEOUT_SECS" "$tmp" xcrun simctl list devices || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$tmp"
+    add_extra NOTE "xcrun simctl list devices failed (rc=$rc)"
+    emit_and_exit UNKNOWN NO_DEVICE "$EX_ENV"
+  fi
+  if ! grep -q "$IOS_UDID.*(Booted)" "$tmp"; then
+    rm -f "$tmp"
+    add_extra NOTE "simulator $IOS_UDID is not booted; run srr-qa-preflight ios"
+    emit_and_exit UNKNOWN NO_DEVICE "$EX_ENV"
+  fi
+  rm -f "$tmp"
+
+  # Process running?
+  tmp="$(mktemp)"; rc=0
+  vlog "xcrun simctl spawn $IOS_UDID launchctl list"
+  run_to "$TIMEOUT_SECS" "$tmp" xcrun simctl spawn "$IOS_UDID" launchctl list || rc=$?
+  local running=0
+  if [ "$rc" -eq 0 ] && grep -q "UIKitApplication:$IOS_BUNDLE_ID" "$tmp"; then
+    running=1
+  fi
+  rm -f "$tmp"
+
+  if [ "$running" -eq 0 ]; then
+    add_extra APP_RUNNING 0
+    add_extra NOTE "no UIKitApplication:$IOS_BUNDLE_ID in launchctl list"
+    emit_and_exit APP_NOT_RUNNING PROCESS_NOT_FOUND "$EX_APP_NOT_RUNNING"
+  fi
+  add_extra APP_RUNNING 1
+
+  if [ "$TAKE_SCREENSHOT" -eq 1 ]; then
+    local shot="${TMPDIR:-/tmp}/mobile-qa-ios-$(date +%Y%m%d-%H%M%S).png"
+    tmp="$(mktemp)"; rc=0
+    vlog "xcrun simctl io $IOS_UDID screenshot $shot"
+    run_to "$TIMEOUT_SECS" "$tmp" xcrun simctl io "$IOS_UDID" screenshot "$shot" || rc=$?
+    rm -f "$tmp"
+    if [ "$rc" -eq 0 ] && [ -s "$shot" ]; then
+      add_extra SCREENSHOT "$shot"
+    else
+      log "warn: screenshot capture failed (rc=$rc)"
+    fi
+  fi
+
+  add_extra NOTE "iOS login state is not shell-detectable here; the calling agent must call mobile_list_elements_on_screen and decide"
+  log ""
+  log "iOS: app IS running on $IOS_UDID, but this script cannot read the view"
+  log "hierarchy from the shell (idb is unusable on this machine). It reports"
+  log "UNKNOWN on purpose rather than guessing. Determine login state with"
+  log "mobile_list_elements_on_screen; logged-out markers to look for:"
+  log "  ${LOGGED_OUT_MARKERS[*]-<none configured>}"
+  emit_and_exit UNKNOWN IOS_SHELL_DETECTION_LIMIT "$EX_UNKNOWN"
+}
+
+# ----------------------------------------------------------------------------
+# Android
+# ----------------------------------------------------------------------------
+android_resolve_serial() {
+  if [ -n "$OVERRIDE_SERIAL" ]; then ANDROID_SERIAL="$OVERRIDE_SERIAL"; return 0; fi
+  ANDROID_SERIAL="$(cfg 'android.serial' 'MOBILE_QA_ANDROID_SERIAL' '')"
+  if [ -n "$ANDROID_SERIAL" ]; then return 0; fi
+
+  local tmp rc=0; tmp="$(mktemp)"
+  vlog "adb devices"
+  run_to "$TIMEOUT_SECS" "$tmp" adb devices || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$tmp"
+    add_extra NOTE "adb devices failed (rc=$rc)"
+    emit_and_exit UNKNOWN NO_DEVICE "$EX_ENV"
+  fi
+  local serials
+  serials="$(awk 'NR>1 && $2=="device" {print $1}' "$tmp")"
+  rm -f "$tmp"
+  local count=0
+  [ -n "$serials" ] && count="$(printf '%s\n' "$serials" | wc -l | tr -d ' ')"
+  if [ "$count" -eq 0 ]; then
+    add_extra NOTE "no adb device in 'device' state"
+    emit_and_exit UNKNOWN NO_DEVICE "$EX_ENV"
+  fi
+  if [ "$count" -gt 1 ]; then
+    add_extra NOTE "multiple adb devices: $(printf '%s' "$serials" | tr '\n' ' ')"
+    emit_and_exit UNKNOWN DEVICE_AMBIGUOUS "$EX_ENV"
+  fi
+  ANDROID_SERIAL="$serials"
+}
+
+state_android() {
+  command -v adb >/dev/null 2>&1 || {
+    add_extra NOTE "adb not found on PATH (Android platform-tools required)"
+    emit_and_exit UNKNOWN TOOL_MISSING "$EX_ENV"
+  }
+
+  ANDROID_PACKAGE="$(cfg 'android.package' 'MOBILE_QA_ANDROID_PACKAGE' '')"
+  [ -n "$ANDROID_PACKAGE" ] || config_error "Android package is not configured" \
+    "android.package" "MOBILE_QA_ANDROID_PACKAGE"
+
+  android_resolve_serial
+  add_extra DEVICE "$ANDROID_SERIAL"
+
+  # Process running?
+  local tmp rc=0; tmp="$(mktemp)"
+  vlog "adb -s $ANDROID_SERIAL shell pidof $ANDROID_PACKAGE"
+  run_to "$TIMEOUT_SECS" "$tmp" adb -s "$ANDROID_SERIAL" shell pidof "$ANDROID_PACKAGE" || rc=$?
+  local pid; pid="$(tr -d '\r' <"$tmp" | tr -d '[:space:]')"
+  rm -f "$tmp"
+  if [ -z "$pid" ]; then
+    add_extra APP_RUNNING 0
+    add_extra NOTE "pidof $ANDROID_PACKAGE returned nothing"
+    emit_and_exit APP_NOT_RUNNING PROCESS_NOT_FOUND "$EX_APP_NOT_RUNNING"
+  fi
+  add_extra APP_RUNNING 1
+
+  # Foreground? best effort, never fatal
+  tmp="$(mktemp)"; rc=0
+  vlog "adb -s $ANDROID_SERIAL shell dumpsys window"
+  run_to "$TIMEOUT_SECS" "$tmp" adb -s "$ANDROID_SERIAL" shell dumpsys window || rc=$?
+  if [ "$rc" -eq 0 ] && grep -qE 'mCurrentFocus|mFocusedApp' "$tmp"; then
+    if grep -E 'mCurrentFocus|mFocusedApp' "$tmp" | grep -q "$ANDROID_PACKAGE"; then
+      add_extra FOREGROUND 1
+    else
+      add_extra FOREGROUND 0
+    fi
+  fi
+  rm -f "$tmp"
+
+  # UI dump
+  local xml; xml="$(mktemp)"
+  if ! android_dump_ui "$xml"; then
+    rm -f "$xml"
+    add_extra NOTE "uiautomator dump produced no usable XML"
+    emit_and_exit UNKNOWN DUMP_FAILED "$EX_UNKNOWN"
+  fi
+
+  local verdict
+  verdict="$(android_match_markers "$xml")" || true
+  rm -f "$xml"
+
+  local kind evidence
+  kind="${verdict%%|*}"
+  evidence="${verdict#*|}"
+  [ "$evidence" = "$verdict" ] && evidence=""
+
+  case "$kind" in
+    OUT)
+      [ -n "$evidence" ] && add_extra EVIDENCE "$evidence"
+      emit_and_exit LOGGED_OUT MARKER_MATCH "$EX_LOGGED_OUT"
+      ;;
+    IN)
+      [ -n "$evidence" ] && add_extra EVIDENCE "$evidence"
+      emit_and_exit LOGGED_IN MARKER_MATCH "$EX_LOGGED_IN"
+      ;;
+    BOTH)
+      [ -n "$evidence" ] && add_extra EVIDENCE "$evidence"
+      add_extra NOTE "logged-in and logged-out markers both present; tighten auth.loggedInMarkers/loggedOutMarkers"
+      emit_and_exit UNKNOWN AMBIGUOUS_MARKERS "$EX_UNKNOWN"
+      ;;
+    NONE)
+      if [ "${#LOGGED_IN_MARKERS[@]}" -eq 0 ]; then
+        add_extra NOTE "auth.loggedInMarkers is empty, so a logged-in screen cannot be positively identified"
+        emit_and_exit UNKNOWN NO_LOGGED_IN_MARKERS_CFG "$EX_UNKNOWN"
+      fi
+      add_extra NOTE "no configured marker found on screen (splash, loading, modal or an unlisted screen)"
+      emit_and_exit UNKNOWN NO_MARKERS_MATCHED "$EX_UNKNOWN"
+      ;;
+    *)
+      add_extra NOTE "marker matching failed unexpectedly"
+      emit_and_exit UNKNOWN DUMP_FAILED "$EX_UNKNOWN"
+      ;;
+  esac
+}
+
+# android_dump_ui <outfile> -> rc 0 if outfile holds XML
+android_dump_ui() {
+  local out="$1" remote tmp rc
+  for remote in /sdcard/mobile-qa-uidump.xml /data/local/tmp/mobile-qa-uidump.xml; do
+    tmp="$(mktemp)"; rc=0
+    vlog "adb -s $ANDROID_SERIAL shell uiautomator dump $remote"
+    run_to "$TIMEOUT_SECS" "$tmp" adb -s "$ANDROID_SERIAL" shell uiautomator dump "$remote" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      log "warn: uiautomator dump to $remote failed (rc=$rc): $(tr -d '\r' <"$tmp" | head -1)"
+      rm -f "$tmp"
+      continue
+    fi
+    rm -f "$tmp"
+
+    rc=0
+    vlog "adb -s $ANDROID_SERIAL exec-out cat $remote"
+    run_to "$TIMEOUT_SECS" "$out" adb -s "$ANDROID_SERIAL" exec-out cat "$remote" || rc=$?
+    vlog "adb -s $ANDROID_SERIAL shell rm -f $remote"
+    run_to 10 /dev/null adb -s "$ANDROID_SERIAL" shell rm -f "$remote" >/dev/null 2>&1 || true
+
+    if [ "$rc" -eq 0 ] && [ -s "$out" ] && grep -q '<hierarchy' "$out"; then
+      return 0
+    fi
+    log "warn: could not read back $remote"
+  done
+  return 1
+}
+
+# android_match_markers <xmlfile> -> prints "OUT|evidence" / "IN|evidence" / "BOTH|..." / "NONE"
+android_match_markers() {
+  local xml="$1"
+  python3 - "$xml" "${#LOGGED_OUT_MARKERS[@]}" \
+    ${LOGGED_OUT_MARKERS[@]+"${LOGGED_OUT_MARKERS[@]}"} \
+    ${LOGGED_IN_MARKERS[@]+"${LOGGED_IN_MARKERS[@]}"} <<'PY'
+import re, sys
+
+xml_path = sys.argv[1]
+n_out = int(sys.argv[2])
+rest = sys.argv[3:]
+out_markers = rest[:n_out]
+in_markers = rest[n_out:]
+
+ATTRS = ('resource-id', 'content-desc', 'text')
+
+try:
+    with open(xml_path, encoding='utf-8', errors='replace') as fh:
+        raw = fh.read()
+except Exception:
+    print('NONE')
+    sys.exit(0)
+
+nodes = []
+try:
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(raw)
+    for el in root.iter():
+        nodes.append({a: el.attrib.get(a, '') for a in ATTRS})
+except Exception:
+    # Fallback: attribute scan. Robust against malformed dumps.
+    for chunk in re.findall(r'<node\b[^>]*>', raw):
+        node = {}
+        for a in ATTRS:
+            m = re.search(r'\b%s="([^"]*)"' % re.escape(a), chunk)
+            node[a] = m.group(1) if m else ''
+        nodes.append(node)
+
+
+def hit(marker):
+    """Return 'attr=value' of the first node matching marker, else None."""
+    for node in nodes:
+        rid = node.get('resource-id', '')
+        if rid and (rid == marker or rid.endswith('/' + marker)):
+            return 'resource-id=' + rid
+        for a in ('content-desc', 'text'):
+            v = node.get(a, '')
+            if v and v == marker:
+                return a + '=' + v
+    return None
+
+
+out_hit = next((h for h in (hit(m) for m in out_markers) if h), None)
+in_hit = next((h for h in (hit(m) for m in in_markers) if h), None)
+
+if out_hit and in_hit:
+    print('BOTH|out:%s in:%s' % (out_hit, in_hit))
+elif out_hit:
+    print('OUT|%s' % out_hit)
+elif in_hit:
+    print('IN|%s' % in_hit)
+else:
+    print('NONE')
+PY
+}
+
+# ----------------------------------------------------------------------------
+# Main
+# ----------------------------------------------------------------------------
+main() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      ios|android) PLATFORM="$1"; shift ;;
+      -v|--verbose) VERBOSE=1; shift ;;
+      --no-screenshot) TAKE_SCREENSHOT=0; shift ;;
+      --udid) [ "$#" -ge 2 ] || die_usage "--udid needs a value"; OVERRIDE_UDID="$2"; shift 2 ;;
+      --serial) [ "$#" -ge 2 ] || die_usage "--serial needs a value"; OVERRIDE_SERIAL="$2"; shift 2 ;;
+      --timeout) [ "$#" -ge 2 ] || die_usage "--timeout needs a value"; TIMEOUT_SECS="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      all) die_usage "srr-qa-state takes exactly one platform (ios or android), not 'all'" ;;
+      *) die_usage "unknown argument '$1'" ;;
+    esac
+  done
+
+  [ -n "$PLATFORM" ] || die_usage "platform is required (ios or android)"
+  case "$TIMEOUT_SECS" in
+    ''|*[!0-9]*) die_usage "--timeout must be a positive integer" ;;
+  esac
+  [ "$TIMEOUT_SECS" -gt 0 ] || die_usage "--timeout must be a positive integer"
+
+  command -v python3 >/dev/null 2>&1 || { log "error: python3 is required"; exit "$EX_ENV"; }
+
+  resolve_project_root
+  resolve_config_paths
+  vlog "PROJECT_ROOT=$PROJECT_ROOT"
+  vlog "config: $CFG_MAIN (local overlay: $CFG_LOCAL)"
+  load_markers
+  vlog "loggedOutMarkers: ${LOGGED_OUT_MARKERS[*]-<none>}"
+  vlog "loggedInMarkers: ${LOGGED_IN_MARKERS[*]-<none>}"
+
+  if [ "$PLATFORM" = "ios" ]; then
+    state_ios
+  else
+    state_android
+  fi
+}
+
+main "$@"

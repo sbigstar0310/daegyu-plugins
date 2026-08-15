@@ -1,0 +1,1048 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# srr-qa-android-login
+#
+# Deterministically log a React Native / Expo app into its test account on an
+# Android device or emulator, driven entirely by `adb`.
+#
+# This exists so a QA agent does not have to burn ~10 turns on
+# screenshot -> locate -> tap -> type. Everything here is shell-only and
+# repeatable.
+#
+# NOTHING app-specific is hardcoded. All project facts come from config
+# (see --help for the resolution order and key names).
+# ---------------------------------------------------------------------------
+set -euo pipefail
+
+readonly SCRIPT_NAME="${0##*/}"
+readonly SCRIPT_VERSION="1.0.0"
+
+# --- Exit codes ------------------------------------------------------------
+# Kept as named constants so the flow below reads as prose.
+readonly EX_OK=0                 # success (logged in, or already logged in)
+readonly EX_USAGE=1              # bad flag / missing required config / missing python3
+readonly EX_NO_DEVICE=2          # zero or ambiguous adb devices
+readonly EX_NOT_INSTALLED=3      # target package not installed on the device
+readonly EX_LAUNCH=4             # app would not launch / UI never reached a known state
+readonly EX_NO_LOGIN_SCREEN=5    # could not get to (or find) the credential fields
+readonly EX_INPUT=6              # could not reliably type the credentials
+readonly EX_REJECTED=7           # app reported a login error (bad credentials)
+readonly EX_TIMEOUT=8            # submitted, but post-login UI never appeared
+readonly EX_ADB=9                # adb / uiautomator infrastructure failure
+
+# --- Defaults (universal only — never project-specific) --------------------
+readonly DEFAULT_METRO_PORT=8081
+readonly DEFAULT_IME_PACKAGE="com.google.android.inputmethod.latin"
+readonly DEFAULT_TESTID_EMAIL="email-input"
+readonly DEFAULT_TESTID_PASSWORD="password-input"
+readonly DEFAULT_TESTID_SUBMIT="login-next-btn"
+
+VERBOSE=0
+LOGIN_TIMEOUT=60          # seconds to wait for the post-login UI after submit
+SETTLE_TIMEOUT=45         # seconds to wait for the app to reach a *known* UI state
+WORKDIR=""
+KEEP_WORKDIR=0
+DID_IME_RESET=0           # we only nuke the IME once, and only if input failed
+
+# ---------------------------------------------------------------------------
+# Help
+# ---------------------------------------------------------------------------
+usage() {
+  cat <<EOF
+$SCRIPT_NAME v$SCRIPT_VERSION — one-command Android login for RN/Expo QA runs
+
+USAGE
+  $SCRIPT_NAME [-v] [--timeout SECONDS] [--keep-artifacts]
+  $SCRIPT_NAME --help
+
+WHAT IT DOES
+  1. Verifies exactly one usable adb device (or the one you pinned).
+  2. Verifies the app package is installed.
+  3. Wakes/unlocks the device and foregrounds the app.
+  4. Detects an ALREADY LOGGED IN session and exits 0 immediately.
+     (Firebase Auth persists sessions, so this is the common case.)
+  5. Dismisses a React Native dev LogBox overlay if one is covering the UI.
+  6. Navigates to the email login screen if the app is on a landing screen.
+  7. Types the email + password and submits.
+  8. Polls for the post-login UI until --timeout, then reports.
+
+  UI elements are located by dumping the live view hierarchy with
+  \`uiautomator dump\` and parsing each node's bounds="[left,top][right,bottom]"
+  attribute, then tapping the CENTER of that rectangle. No pixel coordinates
+  are hardcoded, so it works across emulator resolutions (1080x1920, 1440x3120,
+  and anything else).
+
+OPTIONS
+  -v, --verbose        Echo every adb command before running it. Passwords are
+                       masked in the echoed command. Use this first when
+                       debugging a failure.
+      --timeout SEC    Seconds to wait for the post-login UI. Default $LOGIN_TIMEOUT.
+      --keep-artifacts Keep the temp dir of uiautomator dumps even on success.
+  -h, --help           This text.
+
+EXIT CODES
+  $EX_OK   Success. Logged in, or a valid session already existed.
+  $EX_USAGE   Usage / configuration error. A required key is missing, a config
+      file is malformed, or python3 / adb is unavailable. The message names
+      the exact config key and env var to set.
+  $EX_NO_DEVICE   No usable adb device, or several and none pinned. Start an emulator
+      or set MOBILE_QA_ANDROID_SERIAL / android.serial.
+  $EX_NOT_INSTALLED   The app package is not installed on that device. Build and install
+      the dev client first.
+  $EX_LAUNCH   The app would not launch, or its UI never matched any state we
+      recognise (neither logged-in nor logged-out markers). A dump is saved.
+  $EX_NO_LOGIN_SCREEN   Reached the app but could not find the credential fields, i.e. the
+      configured auth.testIds do not match anything on screen.
+  $EX_INPUT   Could not type the credentials reliably (readback mismatch even
+      after an IME reset).
+  $EX_REJECTED   The app rejected the credentials (an auth.errorMarkers node appeared).
+  $EX_TIMEOUT   Submitted, but the post-login UI never appeared within --timeout.
+      Note: if auth.errorMarkers is not configured, rejected credentials also
+      surface here rather than as $EX_REJECTED.
+  $EX_ADB   adb or uiautomator failed at the infrastructure level (e.g. the
+      view hierarchy could not be dumped after repeated retries).
+
+PREREQUISITES
+  * adb on PATH (Android platform-tools).
+  * python3 on PATH (ships with macOS; used only to read the JSON config).
+  * Exactly one booted emulator/device, or MOBILE_QA_ANDROID_SERIAL set.
+  * The app installed. For an Expo dev client, Metro must be running on the
+    configured port (default $DEFAULT_METRO_PORT) or the app will show a red
+    screen instead of the login UI.
+
+CONFIGURATION
+  Every project-specific value resolves in this order, first hit wins:
+
+    1. Environment variable
+    2. \$PROJECT_ROOT/.claude/mobile-qa.local.json   (gitignored — SECRETS live here)
+    3. \$PROJECT_ROOT/.claude/mobile-qa.config.json  (committed — non-secret facts)
+    4. A built-in default, and only where a universal one exists
+
+  PROJECT_ROOT is the git top level of the current directory, or the current
+  directory if that is not a git repo. Override with MOBILE_QA_PROJECT_ROOT.
+  Override the committed config path with MOBILE_QA_CONFIG.
+
+  Config keys consumed by this script:
+
+    android.package          (REQUIRED)  env MOBILE_QA_ANDROID_PACKAGE
+    android.serial           (optional)  env MOBILE_QA_ANDROID_SERIAL
+    metro.port               (default $DEFAULT_METRO_PORT)   env MOBILE_QA_METRO_PORT
+    auth.strategy            (default email-password)
+    auth.email               (REQUIRED)  env MOBILE_QA_EMAIL
+    auth.password            (REQUIRED)  env MOBILE_QA_PASSWORD
+    auth.testIds.email       (default $DEFAULT_TESTID_EMAIL)
+    auth.testIds.password    (default $DEFAULT_TESTID_PASSWORD)
+    auth.testIds.submit      (default $DEFAULT_TESTID_SUBMIT)
+    auth.loggedOutMarkers    (default: the three testIds above)
+    auth.loggedInMarkers     (optional; see LOGIN STATE below)
+    auth.loginEntryMarkers   (optional) markers for a "Log in" link on a landing
+                             screen; tapped to reach the credential fields
+    auth.errorMarkers        (optional) markers that mean "credentials rejected"
+    quirks.androidImePackage (default $DEFAULT_IME_PACKAGE)
+    quirks.dismissLogBox     (default true)
+    quirks.logBoxMarkers     (default: Dismiss / Minimize)
+
+  Credentials must come from the environment or from mobile-qa.local.json.
+  This script ships no default password and never prints one.
+
+LOGIN STATE DETECTION
+  A "marker" is a string matched against the uiautomator dump as an exact
+  resource-id, an exact content-desc, or an exact visible text.
+
+  States are tested most-specific first:
+    login-form  auth.testIds.email is on screen -> fill it in
+    entry       an auth.loginEntryMarkers node is on screen -> tap it, then fill
+    landing     a logged-out marker is on screen but neither of the above ->
+                exit $EX_NO_LOGIN_SCREEN asking you to configure loginEntryMarkers.
+                The script will NOT tap an unconfigured button, because
+                loggedOutMarkers commonly contains OAuth buttons and starting a
+                third-party sign-in flow is unrecoverable from a script.
+    logged-in   see below
+
+  * If auth.loggedInMarkers is non-empty, logged-in means "any of them present".
+  * If it is empty, logged-in is inferred as "the app is drawing its own UI and
+    none of auth.loggedOutMarkers are present". Configuring an explicit
+    logged-in marker (a testID on a post-login screen) is strongly preferred —
+    the inferred form can misfire on splash screens and mid-onboarding flows.
+
+EXAMPLES
+  $SCRIPT_NAME                 # normal QA run
+  $SCRIPT_NAME -v              # show every adb call
+  MOBILE_QA_ANDROID_SERIAL=emulator-5554 $SCRIPT_NAME
+  MOBILE_QA_EMAIL=a@b.com MOBILE_QA_PASSWORD='...' $SCRIPT_NAME
+
+  See examples/mobile-qa.config.json next to this plugin for a filled-in file.
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Logging. All diagnostics go to stderr so stdout stays clean.
+# ---------------------------------------------------------------------------
+log()  { printf '%s\n' "$*" >&2; }
+vlog() { (( VERBOSE )) && printf '  · %s\n' "$*" >&2 || true; }
+die()  { local code=$1; shift; printf '\n%s: ERROR: %s\n' "$SCRIPT_NAME" "$*" >&2; exit "$code"; }
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+while (( $# )); do
+  case "$1" in
+    -h|--help)       usage; exit $EX_OK ;;
+    -v|--verbose)    VERBOSE=1; shift ;;
+    --keep-artifacts) KEEP_WORKDIR=1; shift ;;
+    --timeout)
+      [[ ${2:-} =~ ^[0-9]+$ ]] || die $EX_USAGE "--timeout needs a number of seconds."
+      LOGIN_TIMEOUT=$2; shift 2 ;;
+    --timeout=*)
+      LOGIN_TIMEOUT=${1#*=}
+      [[ $LOGIN_TIMEOUT =~ ^[0-9]+$ ]] || die $EX_USAGE "--timeout needs a number of seconds."
+      shift ;;
+    *) die $EX_USAGE "Unknown argument '$1'. Try --help." ;;
+  esac
+done
+
+command -v adb     >/dev/null 2>&1 || die $EX_USAGE "adb not found on PATH. Install Android platform-tools."
+command -v python3 >/dev/null 2>&1 || die $EX_USAGE "python3 not found on PATH. It is required to read the JSON config."
+
+# ---------------------------------------------------------------------------
+# Config resolution
+#
+# One python3 pass reads both JSON files and applies the documented precedence
+# (env > local > config > default), then emits shell assignments. Every emitted
+# value is shlex.quote()d, so `eval` here is safe against values containing
+# quotes, spaces or shell metacharacters.
+# ---------------------------------------------------------------------------
+PROJECT_ROOT="${MOBILE_QA_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+CONFIG_MAIN="${MOBILE_QA_CONFIG:-$PROJECT_ROOT/.claude/mobile-qa.config.json}"
+CONFIG_LOCAL="$PROJECT_ROOT/.claude/mobile-qa.local.json"
+
+vlog "project root : $PROJECT_ROOT"
+vlog "config       : $CONFIG_MAIN"
+vlog "local config : $CONFIG_LOCAL"
+
+resolve_config() {
+  local emitted
+  emitted=$(
+    MQ_D_METRO_PORT="$DEFAULT_METRO_PORT" \
+    MQ_D_IME="$DEFAULT_IME_PACKAGE" \
+    MQ_D_TID_EMAIL="$DEFAULT_TESTID_EMAIL" \
+    MQ_D_TID_PASSWORD="$DEFAULT_TESTID_PASSWORD" \
+    MQ_D_TID_SUBMIT="$DEFAULT_TESTID_SUBMIT" \
+    python3 - "$CONFIG_MAIN" "$CONFIG_LOCAL" <<'PY'
+import json, os, shlex, sys
+
+main_path, local_path = sys.argv[1], sys.argv[2]
+
+def load(path):
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception as exc:
+        sys.stderr.write("could not parse %s: %s\n" % (path, exc))
+        sys.exit(3)
+    if not isinstance(data, dict):
+        sys.stderr.write("%s must contain a JSON object at the top level\n" % path)
+        sys.exit(3)
+    return data
+
+cfg = load(main_path)
+loc = load(local_path)
+
+def dig(root, dotted):
+    node = root
+    for key in dotted.split("."):
+        if not isinstance(node, dict) or key not in node:
+            return None
+        node = node[key]
+    return node
+
+def blank(value):
+    # None and "" mean "not set". An empty list is a deliberate, meaningful
+    # value (e.g. "this project has no logged-in markers"), so it is kept.
+    return value is None or value == ""
+
+def resolve(env_name, dotted, default=None):
+    """Returns (value, provenance). Precedence: env > local > config > default."""
+    if env_name:
+        raw = os.environ.get(env_name)
+        if not blank(raw):
+            return raw, "env:" + env_name
+    val = dig(loc, dotted)
+    if not blank(val):
+        return val, "local:" + dotted
+    val = dig(cfg, dotted)
+    if not blank(val):
+        return val, "config:" + dotted
+    return default, ("default" if default is not None else "unset")
+
+def emit_scalar(name, value, provenance, secret=False):
+    out = "" if value is None else str(value)
+    print("%s=%s" % (name, shlex.quote(out)))
+    print("SRC_%s=%s" % (name, shlex.quote(provenance)))
+    if secret:
+        print("HAS_%s=%s" % (name, "1" if out else "0"))
+
+def emit_array(name, value, provenance):
+    if value is None:
+        items = []
+    elif isinstance(value, (list, tuple)):
+        items = [str(x) for x in value if str(x) != ""]
+    else:
+        items = [str(value)]
+    print("%s=(%s)" % (name, " ".join(shlex.quote(i) for i in items)))
+    print("SRC_%s=%s" % (name, shlex.quote(provenance)))
+
+D = os.environ.get
+
+emit_scalar("CFG_PACKAGE",   *resolve("MOBILE_QA_ANDROID_PACKAGE", "android.package"))
+emit_scalar("CFG_SERIAL",    *resolve("MOBILE_QA_ANDROID_SERIAL",  "android.serial"))
+emit_scalar("CFG_METRO_PORT",*resolve("MOBILE_QA_METRO_PORT",      "metro.port", D("MQ_D_METRO_PORT")))
+emit_scalar("CFG_STRATEGY",  *resolve(None,                        "auth.strategy", "email-password"))
+
+# Credentials: env or local file only. Never defaulted, never echoed.
+email_v, email_s = resolve("MOBILE_QA_EMAIL", "auth.email")
+pass_v,  pass_s  = resolve("MOBILE_QA_PASSWORD", "auth.password")
+emit_scalar("CFG_EMAIL",    email_v, email_s, secret=True)
+emit_scalar("CFG_PASSWORD", pass_v,  pass_s,  secret=True)
+
+tid_email  = resolve(None, "auth.testIds.email",    D("MQ_D_TID_EMAIL"))
+tid_pass   = resolve(None, "auth.testIds.password", D("MQ_D_TID_PASSWORD"))
+tid_submit = resolve(None, "auth.testIds.submit",   D("MQ_D_TID_SUBMIT"))
+emit_scalar("CFG_TID_EMAIL",    *tid_email)
+emit_scalar("CFG_TID_PASSWORD", *tid_pass)
+emit_scalar("CFG_TID_SUBMIT",   *tid_submit)
+
+# Logged-out defaults to the credential fields themselves: if they are on
+# screen, we are demonstrably not logged in.
+logged_out, logged_out_src = resolve(None, "auth.loggedOutMarkers")
+if logged_out is None:
+    logged_out = [tid_email[0], tid_pass[0], tid_submit[0]]
+    logged_out_src = "default(testIds)"
+emit_array("CFG_LOGGED_OUT", logged_out, logged_out_src)
+emit_array("CFG_LOGGED_IN",  *resolve(None, "auth.loggedInMarkers"))
+emit_array("CFG_ENTRY",      *resolve(None, "auth.loginEntryMarkers"))
+emit_array("CFG_ERRORS",     *resolve(None, "auth.errorMarkers"))
+
+emit_scalar("CFG_IME_PACKAGE", *resolve(None, "quirks.androidImePackage", D("MQ_D_IME")))
+emit_scalar("CFG_DISMISS_LOGBOX", *resolve(None, "quirks.dismissLogBox", "true"))
+logbox, logbox_src = resolve(None, "quirks.logBoxMarkers")
+if logbox is None:
+    logbox, logbox_src = ["Dismiss", "Minimize"], "default"
+emit_array("CFG_LOGBOX", logbox, logbox_src)
+PY
+  ) || die $EX_USAGE "Configuration could not be read (see message above). Checked:
+  $CONFIG_MAIN
+  $CONFIG_LOCAL"
+  eval "$emitted"
+}
+resolve_config
+
+# quirks.dismissLogBox may arrive as JSON true/false or the strings true/false.
+DISMISS_LOGBOX=1
+case "$(printf '%s' "$CFG_DISMISS_LOGBOX" | tr '[:upper:]' '[:lower:]')" in
+  false|0|no) DISMISS_LOGBOX=0 ;;
+esac
+
+# --- Required-value validation, with actionable messages -------------------
+[[ -n "$CFG_PACKAGE" ]] || die $EX_USAGE "Android package is not configured.
+  Set env MOBILE_QA_ANDROID_PACKAGE, or add \"android\": {\"package\": \"...\"}
+  to $CONFIG_MAIN
+  (find it with: adb shell pm list packages | grep -i <your app>)"
+
+[[ -n "$CFG_EMAIL" ]] || die $EX_USAGE "Test account email is not configured.
+  Set env MOBILE_QA_EMAIL, or add \"auth\": {\"email\": \"...\"} to
+  $CONFIG_LOCAL  (this file is gitignored — credentials belong here, not in
+  the committed config)."
+
+[[ -n "$CFG_PASSWORD" ]] || die $EX_USAGE "Test account password is not configured.
+  Set env MOBILE_QA_PASSWORD, or add \"auth\": {\"password\": \"...\"} to
+  $CONFIG_LOCAL  (gitignored)."
+
+[[ "$CFG_STRATEGY" == "email-password" ]] || die $EX_USAGE \
+  "auth.strategy is '$CFG_STRATEGY' but this script only implements 'email-password'."
+
+if (( VERBOSE )); then
+  vlog "package      = $CFG_PACKAGE            [$SRC_CFG_PACKAGE]"
+  vlog "serial       = ${CFG_SERIAL:-<auto>}   [$SRC_CFG_SERIAL]"
+  vlog "metro port   = $CFG_METRO_PORT         [$SRC_CFG_METRO_PORT]"
+  vlog "email        = <set>                   [$SRC_CFG_EMAIL]"
+  vlog "password     = <set>                   [$SRC_CFG_PASSWORD]"
+  vlog "testIds      = $CFG_TID_EMAIL / $CFG_TID_PASSWORD / $CFG_TID_SUBMIT"
+  vlog "loggedOut    = ${CFG_LOGGED_OUT[*]:-<none>}   [$SRC_CFG_LOGGED_OUT]"
+  vlog "loggedIn     = ${CFG_LOGGED_IN[*]:-<none>}    [$SRC_CFG_LOGGED_IN]"
+fi
+
+# ---------------------------------------------------------------------------
+# Workspace for dumps (kept on failure so a human can inspect the hierarchy)
+# ---------------------------------------------------------------------------
+WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/mobile-qa-android-login.XXXXXX")
+readonly DEVICE_DUMP="/sdcard/mobile-qa-uidump.xml"
+readonly LOCAL_DUMP="$WORKDIR/ui.xml"
+readonly NODES="$WORKDIR/nodes.txt"   # one <node .../> per line
+
+cleanup() {
+  local rc=$?
+  # Always remove our scratch file from the device — never leave it dirtier
+  # than we found it. Inlined (rather than via adb_run) because this may fire
+  # before a device has been selected.
+  command adb ${ADB_ARGS[@]+"${ADB_ARGS[@]}"} shell rm -f "$DEVICE_DUMP" >/dev/null 2>&1 || true
+  # Only advertise artifacts if we actually captured any — a failure before the
+  # first dump leaves an empty dir, and pointing a human at it is just noise.
+  if (( rc == 0 && ! KEEP_WORKDIR )) || [[ ! -s $NODES ]]; then
+    rm -rf "$WORKDIR"
+  elif [[ -d $WORKDIR ]]; then
+    log ""
+    log "Artifacts kept for inspection: $WORKDIR"
+    log "  ui.xml    — last uiautomator dump"
+    log "  nodes.txt — same dump, one node per line (grep this)"
+  fi
+  exit $rc
+}
+trap cleanup EXIT
+
+# ---------------------------------------------------------------------------
+# adb plumbing
+# ---------------------------------------------------------------------------
+ADB_ARGS=()   # filled in once the device is chosen
+
+adb_raw() { command adb "$@"; }
+
+# Mask the password anywhere it appears in a verbose command echo.
+mask() {
+  local text=$*
+  [[ -n $CFG_PASSWORD ]] && text=${text//"$CFG_PASSWORD"/<password>}
+  printf '%s' "$text"
+}
+
+adb_run() {
+  (( VERBOSE )) && log "  \$ adb ${ADB_ARGS[*]:-} $(mask "$@")"
+  # ${ARR[@]+"${ARR[@]}"} expands to nothing at all when ARR is empty. The
+  # more obvious "${ARR[@]:-}" would instead pass one EMPTY argument to adb.
+  command adb ${ADB_ARGS[@]+"${ADB_ARGS[@]}"} "$@"
+}
+
+# Shell-quote a string for the DEVICE's shell (/system/bin/sh, i.e. mksh).
+#
+# WHY THIS MATTERS — the escaping story, end to end:
+#
+#   `adb shell CMD...` does NOT run CMD locally. adb joins its arguments with
+#   spaces into one command string, ships that string to the device, and the
+#   device's shell parses it. So a value has to survive TWO parsers: our local
+#   bash (handled by normal "$var" quoting) and the device shell.
+#
+#   Single quotes are the device shell's strongest quoting: every byte inside
+#   is literal, with no exception. That makes them exactly right for:
+#     '@'  Not a shell metacharacter at all, and the KeyCharacterMap types it
+#          fine — but quoting costs nothing and removes all doubt.
+#     '!'  History expansion is an INTERACTIVE-shell feature; mksh running a
+#          non-interactive command string does not expand it. Inside single
+#          quotes it is unambiguously literal either way. Our concern was a
+#          password ending in "!!", and this handles it.
+#     '&'  The real historical breakage (issuetracker.google.com/37003806):
+#          unquoted, the device shell backgrounds the command at the `&` and
+#          silently drops the rest of the string. Single quotes fix it.
+#     ' '  A space inside single quotes stays inside ONE argv element, so
+#          `input text` receives the whole string rather than just the first
+#          word. We deliberately do NOT translate spaces to the legacy "%s"
+#          form: whether `input text` still decodes %s varies by Android
+#          version, and a wrong guess types a literal "%s" into the field.
+#     "'"  Handled by closing the quote, emitting an escaped quote, reopening:
+#          the standard '\'' dance below.
+#
+#   The one residual hazard is '%', which AOSP's Input.java treats as an
+#   escape introducer ("%s" -> space). A lone '%' passes through, but a
+#   literal "%s" inside a password cannot be typed this way. We warn on '%'
+#   and, crucially, VERIFY BY READBACK after typing — verification is what
+#   actually makes this safe, rather than trusting any escaping table.
+device_squote() {
+  local s=${1//\'/\'\\\'\'}
+  printf "'%s'" "$s"
+}
+
+# ---------------------------------------------------------------------------
+# Step 1 — pick exactly one usable device
+# ---------------------------------------------------------------------------
+select_device() {
+  local list devices=() line serial state
+
+  list=$(adb_raw devices 2>/dev/null) || die $EX_ADB \
+    "\`adb devices\` failed. Try: adb kill-server && adb start-server"
+
+  while IFS= read -r line; do
+    [[ $line == "List of devices attached"* ]] && continue
+    [[ -z ${line//[[:space:]]/} ]] && continue
+    serial=$(printf '%s' "$line" | awk '{print $1}')
+    state=$(printf '%s' "$line" | awk '{print $2}')
+    case "$state" in
+      device) devices+=("$serial") ;;
+      unauthorized) log "note: $serial is 'unauthorized' — accept the USB debugging prompt on the device." ;;
+      offline)      log "note: $serial is 'offline' — it is booting or wedged." ;;
+    esac
+  done <<<"$list"
+
+  if [[ -n $CFG_SERIAL ]]; then
+    local found=0 d
+    for d in "${devices[@]:-}"; do [[ $d == "$CFG_SERIAL" ]] && found=1; done
+    (( found )) || die $EX_NO_DEVICE "Pinned device '$CFG_SERIAL' is not connected/ready.
+  Connected and ready: ${devices[*]:-<none>}
+  Fix: start that emulator, or unset MOBILE_QA_ANDROID_SERIAL / android.serial."
+    ADB_ARGS=(-s "$CFG_SERIAL")
+    log "Device: $CFG_SERIAL (pinned)"
+    return
+  fi
+
+  case ${#devices[@]} in
+    0) die $EX_NO_DEVICE "No usable Android device or emulator is attached.
+  \`adb devices\` shows nothing in state 'device'.
+  Fix one of:
+    * Start an emulator:  emulator -list-avds  then  emulator -avd <name> &
+    * Plug in a device and accept the USB debugging prompt.
+    * If a device is listed as offline/unauthorized: adb kill-server && adb start-server" ;;
+    1) ADB_ARGS=(-s "${devices[0]}"); log "Device: ${devices[0]}" ;;
+    *) die $EX_NO_DEVICE "${#devices[@]} usable devices attached: ${devices[*]}
+  Refusing to guess. Pin one:
+    MOBILE_QA_ANDROID_SERIAL=${devices[0]} $SCRIPT_NAME
+  or set \"android\": {\"serial\": \"${devices[0]}\"} in $CONFIG_MAIN" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# Step 2 — app installed?
+# ---------------------------------------------------------------------------
+ensure_installed() {
+  local packages
+  packages=$(adb_run shell pm list packages 2>/dev/null | tr -d '\r') || die $EX_ADB \
+    "Could not query installed packages (\`pm list packages\` failed)."
+  if ! grep -qx "package:$CFG_PACKAGE" <<<"$packages"; then
+    die $EX_NOT_INSTALLED "Package '$CFG_PACKAGE' is not installed on this device.
+  Install the app first, e.g.:
+    npm run android            (Expo dev client)
+    adb install -r <path>.apk
+  If the package name is simply wrong, list candidates with:
+    adb ${ADB_ARGS[*]} shell pm list packages | grep -i <app name>"
+  fi
+  vlog "package '$CFG_PACKAGE' is installed"
+}
+
+# ---------------------------------------------------------------------------
+# Step 3 — wake, unlock, foreground
+# ---------------------------------------------------------------------------
+launch_app() {
+  # Non-destructive: wake and dismiss a swipe keyguard. No-ops if already awake.
+  adb_run shell input keyevent 224 >/dev/null 2>&1 || true   # KEYCODE_WAKEUP
+  adb_run shell wm dismiss-keyguard >/dev/null 2>&1 || true
+
+  # `monkey --category LAUNCHER 1` starts the launcher activity without us
+  # having to know the activity class name — which is what keeps this generic.
+  # If the app is already running it is simply brought to the front.
+  if ! adb_run shell "monkey -p $(device_squote "$CFG_PACKAGE") -c android.intent.category.LAUNCHER 1" >/dev/null 2>&1; then
+    die $EX_LAUNCH "Could not launch '$CFG_PACKAGE' via monkey.
+  Try manually:  adb ${ADB_ARGS[*]} shell monkey -p $CFG_PACKAGE -c android.intent.category.LAUNCHER 1"
+  fi
+  vlog "launch intent sent; waiting for first frame"
+  sleep 3
+}
+
+# ---------------------------------------------------------------------------
+# uiautomator dump + parsing
+#
+# `uiautomator dump` writes an XML tree whose leaf elements look like:
+#
+#   <node index="0" text="" resource-id="com.example:id/email-input"
+#         class="android.widget.EditText" package="com.example"
+#         content-desc="Email" checkable="false" ... password="false"
+#         bounds="[42,318][1398,462]" />
+#
+# bounds is "[left,top][right,bottom]" in absolute screen PIXELS (it is
+# AccessibilityNodeInfo.getBoundsInScreen() serialised by
+# AccessibilityNodeInfoDumper). Tapping the centre — ((l+r)/2, (t+b)/2) — is
+# resolution-independent, which is the whole point of parsing rather than
+# hardcoding taps.
+#
+# React Native's testID surfaces differently across RN versions and view types:
+# sometimes as resource-id (bare, or prefixed "pkg:id/"), sometimes as
+# content-desc. We match all of those forms, plus exact visible text, so the
+# same marker string works either way.
+# ---------------------------------------------------------------------------
+dump_ui() {
+  local attempt out
+  for attempt in 1 2 3 4; do
+    # uiautomator reports "could not get idle state" when something on screen
+    # is animating — extremely common in React Native. Retrying is the known
+    # workaround; the file is often written even when it complains, so we
+    # judge by the file content, not by the message.
+    out=$(adb_run shell "uiautomator dump $(device_squote "$DEVICE_DUMP")" 2>&1 | tr -d '\r') || true
+    vlog "uiautomator: ${out:-<no output>} (attempt $attempt)"
+
+    # exec-out (not shell) so no CRLF translation mangles the XML.
+    if adb_run exec-out cat "$DEVICE_DUMP" >"$LOCAL_DUMP" 2>/dev/null && [[ -s $LOCAL_DUMP ]]; then
+      if grep -q '<node' "$LOCAL_DUMP"; then
+        # Normalise: uiautomator emits the whole tree on ONE line. Strip CRs,
+        # flatten any stray newlines, then break between every pair of adjacent
+        # elements so the rest of the script can use line-oriented grep.
+        # (The literal backslash-newline in the replacement is the portable
+        # form; BSD sed on macOS does not accept "\n" there.)
+        tr -d '\r' <"$LOCAL_DUMP" | tr '\n' ' ' | sed 's|><|>\
+<|g' >"$NODES"
+        vlog "dumped $(grep -c '<node' "$NODES" || true) nodes"
+        return 0
+      fi
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+dump_ui_or_die() {
+  dump_ui || die $EX_ADB "Could not dump the view hierarchy after 4 attempts.
+  \`uiautomator dump\` keeps failing. Usually one of:
+    * the screen is permanently animating (a looping RN animation),
+    * the device is at the lock screen or showing a system dialog,
+    * /sdcard is not writable.
+  Reproduce with:  adb ${ADB_ARGS[*]} shell uiautomator dump $DEVICE_DUMP"
+}
+
+# Emit the grep -F needles that mean "this node IS the marker".
+# grep -F (fixed strings) sidesteps regex escaping entirely; because each
+# needle includes the closing quote, matches are exact attribute values, not
+# prefixes. Note: a marker containing a character XML-escapes (& < > ") will
+# not match literally — use plain testIDs.
+marker_needles() {
+  local m=$1
+  printf '%s\n' \
+    "resource-id=\"$m\"" \
+    ":id/$m\"" \
+    "content-desc=\"$m\"" \
+    "text=\"$m\""
+}
+
+# Is a marker present anywhere in the current dump?
+dump_has_marker() {
+  local m=$1 needle
+  while IFS= read -r needle; do
+    grep -qF "$needle" "$NODES" && return 0
+  done < <(marker_needles "$m")
+  return 1
+}
+
+# Does the dump contain any of the markers passed as arguments?
+# (Markers are passed by value rather than by nameref so this stays compatible
+# with the bash 3.2 that ships with macOS.)
+dump_has_any() {
+  local m
+  for m in "$@"; do
+    [[ -z $m ]] && continue
+    if dump_has_marker "$m"; then
+      vlog "marker present: $m"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Print the first node line matching a marker, preferring interactive nodes.
+find_node() {
+  local m=$1 needle hits
+  while IFS= read -r needle; do
+    hits=$(grep -F "$needle" "$NODES" || true)
+    [[ -z $hits ]] && continue
+    # Prefer a node that is actually clickable/focusable; RN often nests the
+    # testID on a wrapper whose child holds the touch target.
+    local best
+    best=$(grep -E 'clickable="true"|focusable="true"' <<<"$hits" | head -n1 || true)
+    printf '%s\n' "${best:-$(head -n1 <<<"$hits")}"
+    return 0
+  done < <(marker_needles "$m")
+  return 1
+}
+
+# bounds="[l,t][r,b]"  ->  "cx cy"
+node_center() {
+  local node=$1 bounds l t r b
+  bounds=$(sed -n 's/.*bounds="\[\([0-9-]*\),\([0-9-]*\)\]\[\([0-9-]*\),\([0-9-]*\)\]".*/\1 \2 \3 \4/p' <<<"$node")
+  [[ -z $bounds ]] && return 1
+  read -r l t r b <<<"$bounds"
+  # A zero-area rect means the view is laid out but not visible — never tap it.
+  (( r > l && b > t )) || return 1
+  printf '%d %d\n' $(( (l + r) / 2 )) $(( (t + b) / 2 ))
+}
+
+# Read the text="..." attribute of a node line (XML-unescaped for the common entities).
+node_text() {
+  sed -n 's/.* text="\([^"]*\)".*/\1/p' <<<"$1" \
+    | sed 's/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&quot;/"/g; s/&apos;/'"'"'/g'
+}
+
+tap_xy() {
+  vlog "tap ($1, $2)"
+  adb_run shell "input tap $1 $2" >/dev/null 2>&1
+}
+
+# Find a marker in the CURRENT dump and tap its centre.
+tap_marker() {
+  local m=$1 node xy
+  node=$(find_node "$m") || { vlog "marker not found: $m"; return 1; }
+  xy=$(node_center "$node") || { vlog "marker '$m' has no tappable bounds"; return 1; }
+  # shellcheck disable=SC2086  # xy is a controlled "x y" pair
+  tap_xy $xy
+}
+
+# ---------------------------------------------------------------------------
+# Keyboard / IME helpers
+# ---------------------------------------------------------------------------
+ime_is_shown() {
+  adb_run shell dumpsys input_method 2>/dev/null | tr -d '\r' | grep -q 'mInputShown=true'
+}
+
+# Close the soft keyboard WITHOUT navigating back. KEYCODE_BACK closes the IME
+# when it is up; if it is not up the same key pops the navigation stack, so we
+# only ever send it behind this guard.
+hide_keyboard() {
+  if ime_is_shown; then
+    vlog "hiding soft keyboard"
+    adb_run shell input keyevent 4 >/dev/null 2>&1 || true
+    sleep 1
+  fi
+}
+
+# Gboard on our emulators gets into a state where it silently swallows input.
+# Clearing its data fixes it, but it also resets the user's keyboard state, so
+# this is a repair action taken at most once, only after input has demonstrably
+# failed — never a routine step.
+reset_ime() {
+  (( DID_IME_RESET )) && return 1
+  DID_IME_RESET=1
+  log "Text entry failed; resetting the IME ($CFG_IME_PACKAGE) and retrying once."
+  adb_run shell "pm clear $(device_squote "$CFG_IME_PACKAGE")" >/dev/null 2>&1 || {
+    vlog "pm clear failed (IME package may not be installed on this image)"
+    return 1
+  }
+  sleep 3
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Typing
+# ---------------------------------------------------------------------------
+type_text() {
+  local text=$1
+  [[ $text == *%* ]] && vlog "warning: text contains '%', which \`input text\` treats as an escape introducer"
+  adb_run shell "input text $(device_squote "$text")" >/dev/null 2>&1
+}
+
+# Fallback used when a whole-string send did not land: one character at a time.
+# Slower, but each send is trivially unambiguous, and a space becomes an
+# explicit KEYCODE_SPACE rather than relying on the %s legacy decoding.
+type_text_charwise() {
+  local text=$1 i ch
+  vlog "falling back to character-by-character entry (${#text} chars)"
+  for (( i = 0; i < ${#text}; i++ )); do
+    ch=${text:i:1}
+    if [[ $ch == " " ]]; then
+      adb_run shell input keyevent 62 >/dev/null 2>&1 || return 1   # KEYCODE_SPACE
+    else
+      adb_run shell "input text $(device_squote "$ch")" >/dev/null 2>&1 || return 1
+    fi
+  done
+}
+
+clear_field() {
+  # Select-all then delete. Works on any focused EditText and avoids assuming
+  # the current cursor position or content length.
+  adb_run shell input keyevent 123 >/dev/null 2>&1 || true   # KEYCODE_MOVE_END
+  adb_run shell "input keyevent $(printf '67 %.0s' {1..60})" >/dev/null 2>&1 || true  # DEL x60
+}
+
+# Focus a field by marker, type into it, then verify by reading the value back
+# out of a fresh dump. Readback is what makes the escaping safe in practice:
+# we never assume the characters survived, we check.
+#
+#   check_mode = "exact"    -> the field's text must equal what we sent
+#   check_mode = "nonempty" -> the field is a password field; the accessibility
+#                              layer masks its text, so we can only confirm
+#                              that something landed.
+fill_field() {
+  local marker=$1 value=$2 check_mode=$3 label=$4
+  local attempt node xy actual
+
+  for attempt in 1 2 3; do
+    dump_ui_or_die
+    node=$(find_node "$marker") || return 2      # 2 = field not on screen
+    xy=$(node_center "$node") || return 2
+    # shellcheck disable=SC2086
+    tap_xy $xy
+    sleep 1
+
+    clear_field
+    if (( attempt == 1 )); then
+      type_text "$value" || true
+    else
+      type_text_charwise "$value" || true
+    fi
+    sleep 1
+
+    hide_keyboard
+    dump_ui_or_die
+    node=$(find_node "$marker") || return 2
+    actual=$(node_text "$node")
+
+    if [[ $check_mode == exact ]]; then
+      if [[ $actual == "$value" ]]; then
+        vlog "$label verified by readback"
+        return 0
+      fi
+      # Don't print the value of a secret field; email is fine to show.
+      vlog "$label readback mismatch (got '${actual}')"
+    else
+      if [[ -n $actual && $actual != "null" ]]; then
+        vlog "$label appears populated (masked: ${#actual} chars)"
+        return 0
+      fi
+      vlog "$label still reads empty"
+    fi
+
+    # Second failure is when we suspect a wedged IME.
+    (( attempt == 2 )) && { reset_ime || true; }
+  done
+  return 1   # 1 = typed, but never verified
+}
+
+# ---------------------------------------------------------------------------
+# UI state classification
+# ---------------------------------------------------------------------------
+app_is_foreground() {
+  adb_run shell dumpsys window 2>/dev/null | tr -d '\r' \
+    | grep -E 'mCurrentFocus|mFocusedApp' | grep -qF "$CFG_PACKAGE"
+}
+
+# Does the dump belong to our app at all? Guards the inferred logged-in case
+# below from returning "logged in!" while we are staring at the home screen.
+dump_is_our_app() { grep -qF "package=\"$CFG_PACKAGE\"" "$NODES"; }
+
+# "We are on the credential form" is the precise, unambiguous signal: the
+# configured email field is on screen. This is deliberately NOT the same as
+# is_logged_out, because loggedOutMarkers legitimately includes landing-screen
+# things (a "Log in" link, an OAuth button) that appear BEFORE the form exists.
+# Conflating the two makes the script try to type into a screen with no fields.
+on_login_form() { dump_has_marker "$CFG_TID_EMAIL"; }
+
+# The broad "definitely not authenticated" signal, used to negate is_logged_in.
+is_logged_out() { on_login_form || dump_has_any "${CFG_LOGGED_OUT[@]:-}"; }
+
+is_logged_in() {
+  if (( ${#CFG_LOGGED_IN[@]} > 0 )); then
+    dump_has_any "${CFG_LOGGED_IN[@]}"
+    return
+  fi
+  # Inferred form: our app is drawing, it has drawn something beyond a bare
+  # root view, and none of the logged-out markers are present.
+  #
+  # The node-count floor is only a crude "not an empty splash frame" guard — a
+  # splash screen with a logo and a spinner clears it easily. This whole branch
+  # is a fallback, and --help tells the user to configure auth.loggedInMarkers
+  # instead. Do not read more confidence into it than that.
+  local MIN_CONTENT_NODES=3
+  dump_is_our_app || return 1
+  is_logged_out && return 1
+  (( $(grep -c '<node' "$NODES" || true) >= MIN_CONTENT_NODES )) || return 1
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# LogBox — the RN dev-client red error overlay
+#
+# It is a dev-logging artifact, not an app failure: a warning logged during
+# render will cover the screen with it. Dismissing is correct; failing is not.
+# ---------------------------------------------------------------------------
+dismiss_logbox_if_present() {
+  (( DISMISS_LOGBOX )) || return 0
+  local m
+  for m in "${CFG_LOGBOX[@]:-}"; do
+    [[ -z $m ]] && continue
+    if dump_has_marker "$m"; then
+      log "Dev LogBox overlay detected — dismissing it (this is a dev-logging artifact, not an app bug)."
+      tap_marker "$m" || continue
+      sleep 2
+      dump_ui_or_die
+      return 0
+    fi
+  done
+  return 0
+}
+
+# Wait until the app settles into a state we recognise. Returns via $UI_STATE.
+UI_STATE=""
+wait_for_known_state() {
+  local deadline=$(( SECONDS + SETTLE_TIMEOUT ))
+  while (( SECONDS < deadline )); do
+    dump_ui_or_die
+    dismiss_logbox_if_present
+
+    # Order matters. The credential form is the most specific state, so it is
+    # tested first; a landing screen ("Log in" link, OAuth buttons) is next;
+    # only then do we consider ourselves authenticated.
+    if on_login_form; then UI_STATE="login-form"; return 0; fi
+    if dump_has_any "${CFG_ENTRY[@]:-}"; then UI_STATE="entry"; return 0; fi
+    if dump_has_any "${CFG_LOGGED_OUT[@]:-}"; then UI_STATE="landing"; return 0; fi
+    if is_logged_in; then UI_STATE="logged-in"; return 0; fi
+
+    vlog "UI not recognised yet; still settling…"
+    sleep 3
+  done
+  UI_STATE="unknown"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Main flow
+# ---------------------------------------------------------------------------
+main() {
+  select_device
+  ensure_installed
+  launch_app
+
+  if ! app_is_foreground; then
+    vlog "app not focused yet; giving it another moment"
+    sleep 3
+  fi
+
+  # ---- (4) already logged in? The single biggest win, so it goes first. ----
+  if ! wait_for_known_state; then
+    # One recovery attempt: a clean restart also clears any half-drawn dev
+    # screen. Idempotent, and leaves the app running afterwards either way.
+    log "App UI did not match any known state; restarting the app once and retrying."
+    adb_run shell "am force-stop $(device_squote "$CFG_PACKAGE")" >/dev/null 2>&1 || true
+    sleep 2
+    launch_app
+    if ! wait_for_known_state; then
+      cp -f "$NODES" "$WORKDIR/unknown-state-nodes.txt" 2>/dev/null || true
+      die $EX_LAUNCH "The app is running but its UI matches neither the logged-in nor the logged-out markers.
+  Likely causes:
+    * Metro is not serving on port $CFG_METRO_PORT, so the dev client is stuck on a
+      loading or error screen.  Start it:  npx expo start
+    * The app is parked on an onboarding/permission screen this script does
+      not know about.
+    * auth.loggedOutMarkers / auth.loggedInMarkers do not match reality.
+  Inspect the saved hierarchy in $WORKDIR and grep it for resource-id= values."
+    fi
+  fi
+
+  if [[ $UI_STATE == logged-in ]]; then
+    if (( ${#CFG_LOGGED_IN[@]} == 0 )); then
+      log "Already logged in (inferred: app UI present, no logged-out markers)."
+      log "  Tip: set auth.loggedInMarkers to a post-login testID for a stronger check."
+    else
+      log "Already logged in (matched auth.loggedInMarkers)."
+    fi
+    exit $EX_OK
+  fi
+
+  # ---- (6) navigate from a landing screen to the credential fields --------
+  #
+  # We only ever tap an EXPLICITLY configured entry marker. It would be easy to
+  # "helpfully" tap the first logged-out marker we find, but those lists often
+  # contain OAuth buttons (kakao-login-btn, Sign in with Apple…) and tapping one
+  # by accident launches a third-party flow that a headless script cannot exit.
+  # Refusing to guess is the safer failure.
+  if [[ $UI_STATE == entry ]]; then
+    local m tapped=0
+    for m in "${CFG_ENTRY[@]:-}"; do
+      [[ -z $m ]] && continue
+      if dump_has_marker "$m"; then
+        log "On a landing screen — tapping '$m' to open the email login screen."
+        tap_marker "$m" && tapped=1
+        sleep 3
+        break
+      fi
+    done
+    (( tapped )) || die $EX_NO_LOGIN_SCREEN \
+      "Found a login entry marker but could not tap it (no usable bounds)."
+
+    dump_ui_or_die
+    dismiss_logbox_if_present
+    on_login_form || die $EX_NO_LOGIN_SCREEN \
+      "Tapped the login entry point but the credential fields never appeared.
+  Expected a node matching '$CFG_TID_EMAIL'. Check auth.testIds against the
+  saved hierarchy in $WORKDIR."
+
+  elif [[ $UI_STATE == landing ]]; then
+    die $EX_NO_LOGIN_SCREEN \
+      "The app is on a logged-out landing screen, but the credential fields
+  ('$CFG_TID_EMAIL') are not on it and no way in is configured.
+  Fix: set auth.loginEntryMarkers to the testID of the link/button that opens
+  the email login screen, e.g.
+      \"loginEntryMarkers\": [\"log-in-link\"]
+  in $CONFIG_MAIN
+  (Refusing to guess: the logged-out markers on this screen may include OAuth
+  buttons, and tapping one would start a flow this script cannot finish.)
+  Grep $WORKDIR/nodes.txt for the available resource-id / content-desc values."
+  fi
+
+  # ---- (7) fill and submit ------------------------------------------------
+  log "Logging in as ${CFG_EMAIL}…"
+
+  local rc
+  set +e; fill_field "$CFG_TID_EMAIL" "$CFG_EMAIL" exact "email"; rc=$?; set -e
+  case $rc in
+    0) ;;
+    2) die $EX_NO_LOGIN_SCREEN "Could not find the email field (marker '$CFG_TID_EMAIL') on screen.
+  Check auth.testIds.email, and grep $WORKDIR/nodes.txt for the real ids." ;;
+    *) die $EX_INPUT "The email never read back correctly after 3 attempts (including an IME reset).
+  This usually means the keyboard is swallowing input. Try manually:
+    adb ${ADB_ARGS[*]} shell pm clear $CFG_IME_PACKAGE" ;;
+  esac
+
+  set +e; fill_field "$CFG_TID_PASSWORD" "$CFG_PASSWORD" nonempty "password"; rc=$?; set -e
+  case $rc in
+    0) ;;
+    2) die $EX_NO_LOGIN_SCREEN "Could not find the password field (marker '$CFG_TID_PASSWORD') on screen." ;;
+    *) die $EX_INPUT "The password field still reads empty after 3 attempts (including an IME reset)." ;;
+  esac
+
+  hide_keyboard
+  dump_ui_or_die
+
+  if tap_marker "$CFG_TID_SUBMIT"; then
+    log "Submitted."
+  else
+    # Submit buttons are commonly pinned to the bottom and can sit under the
+    # keyboard. If we cannot see it, the IME action on the last field is the
+    # conventional equivalent.
+    vlog "submit marker '$CFG_TID_SUBMIT' not tappable; sending KEYCODE_ENTER instead"
+    adb_run shell input keyevent 66 >/dev/null 2>&1 || true
+    log "Submitted (via keyboard action)."
+  fi
+
+  # ---- (8) poll for the post-login UI ------------------------------------
+  local deadline=$(( SECONDS + LOGIN_TIMEOUT ))
+  while (( SECONDS < deadline )); do
+    sleep 3
+    dump_ui_or_die
+    dismiss_logbox_if_present
+
+    if (( ${#CFG_ERRORS[@]} > 0 )) && dump_has_any "${CFG_ERRORS[@]}"; then
+      die $EX_REJECTED "The app rejected the credentials (matched auth.errorMarkers).
+  Verify MOBILE_QA_EMAIL / MOBILE_QA_PASSWORD (or auth.email / auth.password in
+  $CONFIG_LOCAL) against the real test account."
+    fi
+
+    if is_logged_in && ! is_logged_out; then
+      log "Login succeeded."
+      exit $EX_OK
+    fi
+    vlog "post-login UI not up yet ($(( deadline - SECONDS ))s left)"
+  done
+
+  cp -f "$NODES" "$WORKDIR/timeout-nodes.txt" 2>/dev/null || true
+  die $EX_TIMEOUT "Submitted the credentials but the post-login UI never appeared within ${LOGIN_TIMEOUT}s.
+  Most likely one of:
+    * The credentials were rejected and the app is showing an inline error.
+      Configure auth.errorMarkers so this is reported as exit $EX_REJECTED instead.
+    * The backend or network is slow/unreachable from the emulator.
+    * auth.loggedInMarkers does not match the real post-login screen.
+  The last hierarchy is saved in $WORKDIR — grep it for the error text."
+}
+
+main "$@"

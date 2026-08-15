@@ -1,0 +1,28 @@
+{
+  "_comment": "Version pin for the agent-device driver. This file is the single source of truth for which agent-device build this plugin is allowed to run. bin/mobile-qa-device reads it, resolves a matching binary, and refuses to run anything outside [minVersion, maxVersion]. Do not use @latest anywhere.",
+
+  "package": "agent-device",
+  "knownGoodVersion": "0.20.8",
+  "minVersion": "0.20.5",
+  "maxVersion": "0.20.8",
+  "rollbackTo": "0.20.6",
+
+  "nodeMin": "22.12.0",
+  "_nodeMin_comment": "agent-device package.json declares engines.node >=22.12. npx does NOT enforce it, so a Node 20 host fails later and less clearly. bin/mobile-qa-device enforces the floor itself.",
+
+  "verifiedOn": "2026-08-15",
+  "verifiedBy": "npx -y agent-device@0.20.8 --version  ->  0.20.8   (node v23.9.0, macOS 25.5.0)",
+  "verifiedScope": "CLI resolves and reports its version; --help and 'help doctor' render. Device-driving commands (open/snapshot/press/fill/doctor) were NOT executed during pinning.",
+
+  "knownBadVersions": {
+    "0.20.4": "packaging regression - the published npm tarball was broken. Fixed same day in 0.20.5. Never allow it.",
+    "<0.20.0": "0.20.0 removed gesture duration/velocity positionals and made ref frames expire after a mutation (ADR 0014). Skills and .ad scripts written for 0.20.x are not valid below it."
+  },
+
+  "rollback": [
+    "1. Edit knownGoodVersion (and maxVersion) in this file to rollbackTo.",
+    "2. rm -rf \"${TMPDIR:-/tmp}\"/mobile-qa-device-resolve-* to drop the cached resolution.",
+    "3. mobile-qa-device --resolve   # confirm the reported version changed",
+    "4. If an MCP server entry is configured, update the pinned version in it too and restart the client."
+  ]
+}
