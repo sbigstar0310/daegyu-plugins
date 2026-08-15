@@ -115,11 +115,22 @@ host with no suitable Node at all, it lists the versions it did find and prints
 the install command plus the `MOBILE_QA_NODE_BIN` escape hatch.
 
 `bin/agent-device` is a shim so that commands written as bare `agent-device`
-still hit the pin. **It only works if Claude Code prepends plugin `bin/` to
-PATH.** If PATH is appended instead, a global agent-device wins and you are not
-pinned — which is why `mobile-qa-preflight` explicitly warns when a bare
-`agent-device` resolves to a different version. **Prefer `mobile-qa-device` in
-anything you write down.**
+still hit the pin.
+
+> **Verified, and it is bad news for the shim.** Claude Code *does* put a
+> marketplace-installed plugin's `bin/` on `PATH` — measured inside a real
+> session after `claude plugin install mobile-qa@daegyu-plugins`, all three
+> scripts resolve as bare commands from
+> `~/.claude/plugins/cache/<marketplace>/<plugin>/<sha>/bin`. But it **appends**
+> that directory, at roughly position 30, *after* `/opt/homebrew/bin` and
+> `/usr/local/bin`. So on any machine that has followed the official
+> agent-device skill's `npm install -g agent-device@latest`, the **global,
+> unpinned binary wins** and the shim never runs.
+>
+> Treat the shim as a convenience that works only when no global
+> `agent-device` exists. `mobile-qa-preflight` warns when a bare `agent-device`
+> resolves to a different version — believe it. **Write `mobile-qa-device`,
+> not `agent-device`, in anything you commit.**
 
 ---
 
