@@ -90,6 +90,135 @@ adb -s <serial> shell dumpsys deviceidle | head -20
 Driving the UI and configuring the IME belong to agent-device; a second actor
 touching the same screen is how state desynchronizes mid-test.
 
+`uiautomator dump` is **not** a fallback either: on some emulator images it fails
+outright with `UiAutomationService ... already registered`, because agent-device
+already holds the accessibility connection. Do not build any procedure on it —
+use agent-device's snapshot and screenshots.
+
+---
+
+## Field-verified driver discipline (observed on agent-device 0.20.8)
+
+These are **observations from real runs**, not a restatement of the manual. They
+say what to distrust and how to sequence your own work; they do not document how
+the commands behave. If the installed CLI contradicts one of them, **the CLI
+wins** and the discrepancy is a `CORRECTION` in your report.
+
+### Name your session on every command
+
+Pass **`--session android-qa`** on every invocation — `open`, every action,
+`snapshot`, `screenshot`, `close`, `doctor`.
+
+iOS and Android QA run in parallel by policy and both default to the session name
+`default`, so the second one to start simply fails:
+
+```
+Error (INVALID_ARGS): Session "default" is already bound to apple device "iPhone 17 Pro"
+```
+
+A `close` followed by a fresh `open` can also fail with `DEVICE_IN_USE` unless
+the same `--session` is passed explicitly.
+
+`--session` is a **global** flag: it is accepted on every command even though
+`agent-device help <command>` does not list it (verified on 0.20.8 — an invented
+flag errors with `Unknown flag`, `--session` does not). The CLI also documents
+`AGENT_DEVICE_SESSION` as an environment variable, which is the safer form if you
+are exporting an environment once rather than remembering a flag sixty times.
+
+### A successful-looking action may have done nothing
+
+**After any action that changes persisted state, verify by re-reading the state.
+Never by trusting the log line.** This is the highest-value rule on this page.
+
+An action can print a settled tap and still be a complete no-op:
+
+```
+Tapped @e5 (720,2685), settled
+```
+
+...with no activity transition at all, confirmed afterwards through
+`dumpsys activity activities`. The same failure was reproduced on iOS, where the
+node's accessibility rect spanned an entire header row and the centre-point tap
+landed on empty space beside the right-aligned control that was wanted.
+
+Corollary: **when a node's rect is implausibly large** — a whole row, or the full
+screen — do not tap its centre. Take a screenshot, work out where the control
+really is, and tap computed coordinates.
+
+### Tap the innermost text leaf, not the wrapper
+
+For a component carrying no `accessible` / `accessibilityRole` / `testID`, the
+wrapping ref's coordinates are **wrong from the start** — this is not a staleness
+problem and re-snapshotting does not fix it. Taps aimed at such a wrapper landed
+on the bottom tab bar instead of the intended control, twice. Targeting the
+deepest `Text` leaf worked.
+
+### Refs are per-snapshot, and a stale one lies
+
+- A ref printed **inside a `--settle` diff is not addressable**. Using one yields
+  `Ref @eX needs a complete snapshot`. Take a fresh `snapshot -i` before each
+  action. Reproduced many times.
+- A ref that outlived a screen transition resolves to the **wrong element
+  silently** — it does not error. One stale ref left the app entirely and
+  foregrounded the launcher. Prefer `back --in-app --settle` over a remembered
+  back-button ref.
+
+### Screenshot pixels are not device points
+
+A returned screenshot may be scaled relative to the device: 923x2000 returned for
+a 1440x3120 screen, a factor of 1.56. Tapping raw screenshot coordinates missed
+entirely. Refs remain the default; **when the rect rule above forces you onto
+coordinates, scale them first.**
+
+The CLI documents an `AGENT_DEVICE_SCREENSHOT_SCALE` environment variable, which
+looks like the principled fix for this. It has **not** been exercised in a QA run
+— if you use it, verify the returned image dimensions against the device before
+trusting a coordinate, and report the result as a `FACT`.
+
+### `snapshot -i --json` and the `identifier` field — read the caveat
+
+The JSON snapshot exposes an `identifier` field carrying the RN `testID`; the
+plain-text snapshot does not. Prefer `--json` when matching `auth.*` markers.
+
+**But `identifier` is not reliably populated on Android, and the two runs
+disagree about when.** On a *release-type* build the app's own views exposed it
+normally (`"identifier":"notification-btn"`); on the *debug* build the app views'
+`identifier` was an **empty string** and only true native components (a
+`FlatList`) carried one, forcing label-based targeting. Which behavior is
+authoritative is unknown.
+
+Practical consequence: **a testID-based `loggedInMarker` can silently fail to
+match on Android.** If a marker you expect is missing, confirm with a screenshot
+or a visible label before concluding the app is in the wrong state — and report
+which build type you were on. `--overlay-refs` annotates **only on-screen
+elements** and silently omits off-screen ones.
+
+### Verbs and flags: do not invent them
+
+Observed on 0.20.8: the tap family is `press | click | fill | longpress` —
+**`act` does not exist** (`Unknown command: act`), and `screenshot` takes
+`--out`, not `-o`. When unsure of a command's shape, read
+`agent-device help <topic>` rather than guessing; the CLI is the source of truth.
+
+### Wheel and duration pickers are fling-based
+
+Swipe distance maps non-linearly to step count and overshoots. Expect iterative
+correction rather than one calculated gesture, and re-read the resulting value
+each time. (A ~43px row height was measured once — treat that as an example, not
+a constant.)
+
+### Never change the system navigation mode mid-flow
+
+`adb shell cmd overlay enable-exclusive <nav mode>` **recreates the Activity**.
+Any in-flight photo picker or other `ActivityResultLauncher` loses its callback,
+and every subsequent tap on the gallery entry then logs success while nothing
+opens. `close` + `open` does **not** recover it — only `open --relaunch` does.
+
+The nuance matters: the app's own in-app cancel path does *not* reproduce this.
+It is a **QA-methodology hazard, not an app bug**, and reporting it as a bug
+would be wrong. Change the navigation mode **before** starting a picker flow, or
+`open --relaunch` immediately after changing it.
+
 ---
 
 ## Where your knowledge comes from (four layers)
@@ -183,6 +312,23 @@ solely on the request."
 - **Past turn 25**, take no further actions — return the report immediately.
 - Exiting without a report destroys the entire session's result.
   **Returning the report matters more than finishing the test.**
+
+### Where the budget actually goes (measured)
+
+The first real-device runs overran badly: **~60 driver commands against a 35-turn
+budget on Android, ~90 against 35 on iOS.** Almost none of that was the feature
+checks. The two biggest sinks were environment fights — recovering a broken
+device setting (~20) and driving one duration picker (~15).
+
+Read that as a scoping rule, not a licence to run long:
+
+- **An environment fight is a budget emergency.** Two failed recovery attempts at
+  the same obstacle means stop, mark the test `BLOCKED` with what you saw, and
+  spend the rest on tests that can still run.
+- Prefer one determinism fix before the run (preflight, an explicit device, a
+  known-good starting screen) over three recoveries during it.
+- Budget the checks themselves at roughly 3-6 commands each; if one is costing
+  far more, the environment is the problem, not the feature.
 
 ---
 

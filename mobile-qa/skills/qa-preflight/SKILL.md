@@ -147,17 +147,60 @@ and Expo Go builds. If the app under test is a release build, note it and move o
 **Hand this to the driver. Do not reimplement it.**
 
 ```bash
-mobile-qa-device doctor --platform ios      --app "<agentDevice.ios.app>"
-mobile-qa-device doctor --platform android  --app "<agentDevice.android.app>"
+mobile-qa-device doctor --platform ios      --app "<agentDevice.ios.app>" \
+  --device "<agentDevice.ios.device>" --session ios-qa
+mobile-qa-device doctor --platform android  --app "<agentDevice.android.app>" \
+  --device "<agentDevice.android.device>" --session android-qa
 ```
 
 `doctor` covers what previous versions of this skill did by hand — booted
 devices, the app being installed, Xcode/simctl and Android SDK/adb availability,
-and driver prerequisites. Its **exit code is the contract**; its exact output
-text is version-specific, so read it for the human but do not parse it.
+and driver prerequisites.
 
-Non-zero `doctor` means **BLOCKED**. Surface its message, which carries the
-corrective hint, plus the re-run command.
+### `doctor`'s exit code is NOT the contract — read its output
+
+**This corrects an earlier version of this skill, which said the exit code was
+the contract. It is not.** Observed on agent-device 0.20.8: `doctor` printed
+`Doctor: fail` and still **exited 0**, and `mobile-qa-preflight` consequently
+reported `PREFLIGHT_RESULT=OK` with `*_STATUS=READY` on an environment that was
+not ready at all.
+
+So: **treat a `Doctor: fail` line in the output as BLOCKED regardless of the exit
+code.** Non-zero is still BLOCKED. `mobile-qa-preflight` now parses for this too,
+but if you run `doctor` by hand, read what it says.
+
+Non-zero or a failing line means **BLOCKED**. Surface its message, which carries
+the corrective hint, plus the re-run command.
+
+### Two platform-specific traps
+
+**iOS — always pass `--device` explicitly.** `agent-device devices` counts
+**paired physical devices as `booted=true`**. A machine with one booted simulator
+and two paired iPhones reported `target-app-device: 3 matched` and blocked the
+run. Leaving `agentDevice.ios.device` empty ("let agent-device choose") is only
+safe on a machine with nothing paired; if the run blocks on multiple matches, the
+fix is to fill that config key with the simulator's name, not to guess one here.
+
+**Android — `adb reverse` is load-bearing, though it is only warned about.**
+Without the reverse tunnel the emulator cannot fetch a Metro bundle at all, so
+the advisory becomes an app that will not start several turns later. `doctor`
+does check it (an `android-reverse` line) but a missing tunnel leaves the verdict
+at `Doctor: pass`, so nothing stops the run. `mobile-qa-preflight` now blocks on
+it for an emulator target; if you are running `doctor` by hand, treat a missing
+`adb reverse tcp:<metro port> tcp:<metro port>` as a blocker for a dev-client
+build, not as advice.
+
+**Sessions.** Every command after preflight — `open`, actions, `close` — must
+carry `--session ios-qa` / `--session android-qa`. iOS and Android run in
+parallel and both default to session `default`, which makes the second one fail
+with `Session "default" is already bound to ...`.
+
+`--session` and `--device` are **global** flags: accepted on every command,
+`doctor` included, even though `agent-device help doctor` lists neither.
+(Verified on 0.20.8: an invented flag errors with `Unknown flag`, these do not.)
+Their effect on `doctor`'s own device selection is unconfirmed — what is
+confirmed is that they do not break the call. `AGENT_DEVICE_SESSION` is the
+equivalent environment variable and is harder to forget.
 
 If the app is simply not installed, the fix is the project's own build command
 (for example `npx expo run:ios` / `npx expo run:android`). **Building is a
@@ -216,14 +259,58 @@ used to live here is obsolete and now actively harmful.
 
 ---
 
-## 7. Done criteria
+## 7. Host-project build hazards — recognise and report, never fix
+
+These are properties of the **host React Native / Expo project**, not of the
+driver. You will not fix any of them: a build is user-owned, minutes long, and
+mutates the working tree. What preflight owes the human is the right *name* for
+what went wrong, because each of these presents as "the app is broken" and gets
+misattributed to the app or to the driver.
+
+**A stale native build silently breaks a branch that looks JS-only.** If a branch
+added a native dependency while the installed binary predates it, the app dies at
+import time before any screen renders — for example
+`Cannot find native module 'ExponentImagePicker'`. When the app crashes at entry,
+**suspect "installed binary is older than this branch's native dependency
+changes" first**, and report the project's build command from `build.*`.
+
+**Do not judge Expo pod installation by `ls ios/Pods | grep -i expo`.** Expo
+modules are *development pods*: CocoaPods references them in place under
+`node_modules` and never copies them into `ios/Pods/`, so that grep is empty even
+on a perfectly healthy install. It has already produced a false "pod install never
+ran" diagnosis. Check `ios/Pods/Local Podspecs/` and `ios/Pods/Manifest.lock`
+instead; for proof that a module is actually linked into the binary,
+`strings <app>.debug.dylib | grep <NativeModuleName>`.
+
+**`npx expo run:android -d` wants the AVD name, not the adb serial.**
+`-d emulator-5554` fails with `Could not find device with name`;
+`-d Pixel_7_Pro_API_36` works. Recover the name with `adb emu avd name`.
+
+**iCloud-synced repos accumulate conflict copies.** Files such as `Foo 2.class`
+and `Foo 3.class` under `build/` break D8 dexing with "Type is defined multiple
+times". Cleanup must cover ` 2.`, ` 3.` *and* ` 4.` — and **a failed Gradle build
+resurrects them** out of AGP's `compileTransaction/stash-dir`, so it has to be
+repeated after every failed attempt.
+
+**Stale Eclipse `bin/` directories inside `node_modules/<pkg>/android/`** make
+expo-modules-autolinking emit duplicate package registrations, which crashloops
+the app (`IllegalStateException: DevelopmentClientController was initialized`).
+The tell is the same `new XPackage(),` line appearing twice in the generated
+`ExpoModulesPackageList.java`. It only affects packages discovered by source
+scanning, and it never appears in EAS builds (clean checkout) — only in local
+builds after a long gap.
+
+---
+
+## 8. Done criteria
 
 Preflight passes only when **all** hold:
 
 1. Config present and valid for the requested platform(s)
 2. `mobile-qa-device --resolve` exits `0`
 3. Metro running, or the build under test provably does not need it
-4. `doctor` exits `0` for each requested platform
+4. `doctor` exits `0` **and prints no failing line** for each requested platform
+   (see §4 — a zero exit alone is not sufficient)
 
 Anything else is `DEGRADED` (one platform usable — say which, and test only that)
 or `BLOCKED` (report the exact fix command and stop).

@@ -65,6 +65,115 @@ agent-device at the pinned version), it prints exactly what to do: report
 
 ---
 
+## Field-verified driver discipline (observed on agent-device 0.20.8)
+
+These are **observations from real runs**, not a restatement of the manual. They
+say what to distrust and how to sequence your own work; they do not document how
+the commands behave. If the installed CLI contradicts one of them, **the CLI
+wins** and the discrepancy is a `CORRECTION` in your report.
+
+### Name your session on every command
+
+Pass **`--session ios-qa`** on every invocation — `open`, every action,
+`snapshot`, `screenshot`, `close`, `doctor`.
+
+iOS and Android QA run in parallel by policy and both default to the session name
+`default`, so the second one to start simply fails:
+
+```
+Error (INVALID_ARGS): Session "default" is already bound to apple device "iPhone 17 Pro"
+```
+
+A `close` followed by a fresh `open` can also fail with `DEVICE_IN_USE` unless
+the same `--session` is passed explicitly.
+
+`--session` is a **global** flag: it is accepted on every command even though
+`agent-device help <command>` does not list it (verified on 0.20.8 — an invented
+flag errors with `Unknown flag`, `--session` does not). The CLI also documents
+`AGENT_DEVICE_SESSION` as an environment variable, which is the safer form if you
+are exporting an environment once rather than remembering a flag ninety times.
+
+### A successful-looking action may have done nothing
+
+**After any action that changes persisted state, verify by re-reading the state.
+Never by trusting the log line.** This is the highest-value rule on this page.
+
+An action can print a settled tap and still be a complete no-op:
+
+```
+Tapped @e5 (201,115), settled after 643ms: +0 -0
+```
+
+That node's accessibility rect spanned the entire header row (`x=26, width=350`),
+so the centre-point tap landed on empty space beside the right-aligned control
+that was actually wanted. Nothing in the output said so; it was caught only by
+navigating away, returning, and finding the value unchanged.
+
+Corollary: **when a node's rect is implausibly large** — a whole row, or the full
+screen — do not tap its centre. Take a screenshot, work out where the control
+really is, and tap computed coordinates.
+
+### Tap the innermost text leaf, not the wrapper
+
+For a component carrying no `accessible` / `accessibilityRole` / `testID`, the
+wrapping ref's coordinates are **wrong from the start** — this is not a staleness
+problem and re-snapshotting does not fix it. Taps aimed at such a wrapper landed
+on the bottom tab bar instead of the intended control, twice. Targeting the
+deepest `Text` leaf worked.
+
+### Refs are per-snapshot, and a stale one lies
+
+- A ref printed **inside a `--settle` diff is not addressable**. Using one yields
+  `Ref @eX needs a complete snapshot`. Take a fresh `snapshot -i` before each
+  action. Reproduced many times.
+- A ref that outlived a screen transition resolves to the **wrong element
+  silently** — it does not error. Prefer `back --in-app --settle` over a
+  remembered back-button ref.
+
+### Screenshot pixels are not device points
+
+A returned screenshot may be scaled relative to the device (measured on Android:
+923x2000 returned for a 1440x3120 screen, 1.56x). Tapping raw screenshot
+coordinates missed entirely. Refs remain the default; **when the rect rule above
+forces you onto coordinates, scale them first.**
+
+The CLI documents an `AGENT_DEVICE_SCREENSHOT_SCALE` environment variable, which
+looks like the principled fix for this. It has **not** been exercised in a QA run
+— if you use it, verify the returned image dimensions against the device before
+trusting a coordinate, and report the result as a `FACT`.
+
+### Prefer `snapshot -i --json` when matching configured markers
+
+The JSON snapshot exposes an `identifier` field carrying the RN `testID`; the
+plain-text snapshot does not. If a marker from `auth.*` does not appear to match,
+re-read with `--json` before concluding it is absent. `--overlay-refs` annotates
+**only on-screen elements** and silently omits off-screen ones.
+
+### Verbs and flags: do not invent them
+
+Observed on 0.20.8: the tap family is `press | click | fill | longpress` —
+**`act` does not exist** (`Unknown command: act`), and `screenshot` takes
+`--out`, not `-o`. When unsure of a command's shape, read
+`agent-device help <topic>` rather than guessing; the CLI is the source of truth.
+
+### Wheel and duration pickers are fling-based
+
+Swipe distance maps non-linearly to step count and overshoots. Expect iterative
+correction rather than one calculated gesture, and re-read the resulting value
+each time. (A ~43px row height was measured once — treat that as an example, not
+a constant.)
+
+### iOS device selection: pass `--device` explicitly
+
+`agent-device devices` counts **paired physical devices as `booted=true`**. One
+booted simulator plus two paired iPhones produced `target-app-device: 3 matched`
+and blocked the run. Pass `--device "<Simulator Name>"` from
+`agentDevice.ios.device` in the config on every command. If that key is empty and
+the run blocks on multiple matches, report it as a `CORRECTION` asking for the
+key to be filled in — do not pick a device yourself.
+
+---
+
 ## Where your knowledge comes from (four layers)
 
 | Layer | Location | Contains | How you get it |
@@ -159,6 +268,23 @@ criteria.** Test only what was requested and state in the report:
 - **Past turn 25**, take no further actions — return the report immediately.
 - Exiting without a report destroys the entire session's result.
   **Returning the report matters more than finishing the test.**
+
+### Where the budget actually goes (measured)
+
+The first real-device runs overran badly: **~90 driver commands against a
+35-turn budget on iOS, ~60 against 35 on Android.** Almost none of that was the
+feature checks. The two biggest sinks were environment fights — recovering a
+broken device setting (~20) and driving one duration picker (~15).
+
+Read that as a scoping rule, not a licence to run long:
+
+- **An environment fight is a budget emergency.** Two failed recovery attempts at
+  the same obstacle means stop, mark the test `BLOCKED` with what you saw, and
+  spend the rest on tests that can still run.
+- Prefer one determinism fix before the run (preflight, an explicit device, a
+  known-good starting screen) over three recoveries during it.
+- Budget the checks themselves at roughly 3-6 commands each; if one is costing
+  far more, the environment is the problem, not the feature.
 
 ### Diagnostic fallback
 

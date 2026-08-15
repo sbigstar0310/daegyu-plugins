@@ -19,8 +19,11 @@ in *this* app, **what** counts as success, and **when to stop**.
 > characters, and procedures for `secureTextEntry` fields invisible to the WDA
 > accessibility tree. **All of it is obsolete.** agent-device addresses elements
 > by semantic ref and owns text entry, so none of those failure modes are yours
-> to work around. If you find yourself computing a coordinate, stop — you are
-> solving a problem that no longer exists.
+> to work around. If you find yourself computing a coordinate **on a login
+> field**, stop — you are solving a problem that no longer exists. (Real runs
+> since found one narrow case where coordinates are still the answer: a node
+> whose accessibility rect covers a whole row, so its centre point is empty
+> space. That is documented in the agent file and does not apply here.)
 
 ---
 
@@ -28,6 +31,32 @@ in *this* app, **what** counts as success, and **when to stop**.
 
 Decide from the **first snapshot `open` already returned**. Do not spend a turn
 re-observing. If `auth.loggedInMarkers` are present, **skip this skill entirely**.
+
+Every command you run here still carries **`--session ios-qa`**, like every other
+command in the run. iOS and Android QA execute in parallel and both default to
+session `default`, so an unnamed session fails with
+`Session "default" is already bound to ...`.
+
+### The skip is also a permanent blind spot — say so
+
+A persistently authenticated test account means this skill is skipped on **every**
+run. Across the first four real-device sessions it was skipped every single time,
+so `loginEntryMarkers`, `testIds`, `errorMarkers` and every login-screen defect
+went unexercised while the config's login section looked settled. Absence of
+failures there is absence of evidence, not evidence of correctness.
+
+Two obligations follow:
+
+- When you skip login, **state it in the report** — "login skipped (session
+  already authenticated); login markers remain unverified" — rather than letting
+  silence imply coverage.
+- When login itself is what is under test, a logged-out state must be reached
+  **deliberately**: log out through the app's own logout control, which is the
+  only method that is safe and reversible. Do not assume reinstalling logs you
+  out: auth SDKs that keep their token in the **Keychain** (Firebase Auth among
+  them) survive an app reinstall on iOS. Wiping the simulator or clearing the
+  Keychain to force the issue is out of scope for this agent; if in-app logout is
+  unreachable, report `BLOCKED` and let a human decide.
 
 ---
 

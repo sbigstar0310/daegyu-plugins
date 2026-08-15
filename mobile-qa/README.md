@@ -34,9 +34,10 @@ then `/plugin install mobile-qa@daegyu-plugins`.
 > (Setting it in both places is worse: the marketplace entry is then silently
 > ignored.)
 >
-> This plugin is under active development and **has never been run against a
-> real device**, so fixes must reach users immediately. Reintroduce a version
-> only once it is stable *and* you commit to bumping it on every release.
+> This plugin is under active development — its **first four real-device QA
+> sessions (2026-08-15) contradicted several of its own rules** — so fixes must
+> reach users immediately. Reintroduce a version only once it is stable *and* you
+> commit to bumping it on every release.
 >
 > Consequence, on purpose: `claude plugin validate --strict` reports one
 > warning (`version: No version specified`) and therefore exits non-zero. Plain
@@ -64,6 +65,15 @@ entire classes of workaround** rather than merely improving on them:
 
 If you find yourself computing a coordinate or reaching for `adb shell input`,
 stop — you are solving a problem that no longer exists.
+
+> **One narrow exception, found on the first real-device runs.** The third row is
+> *mostly* true, not entirely. When a node's accessibility rect covers a whole row
+> or the whole screen, a ref-addressed tap hits its centre — which can be empty
+> space — and reports success anyway. Recovering from that means screenshotting
+> and tapping computed coordinates, and **a returned screenshot may be scaled**
+> relative to the device (measured: 923×2000 for a 1440×3120 screen). So the
+> coordinate math is not extinct; it is confined to a rescue path. It never means
+> `adb shell input`. Both agent files carry the rule.
 
 ### Version pin
 
@@ -386,7 +396,7 @@ or `.claude/mobile-qa.local.json`, which the `.gitignore` rules keep ignored.
 | --- | --- |
 | `reportLanguage` | language for report prose (default `en`) |
 | `metro.port` / `metro.startCommand` | Metro |
-| `agentDevice.ios.app` / `.device` | iOS bundle id; device empty = let agent-device choose |
+| `agentDevice.ios.app` / `.device` | iOS bundle id; device empty = let agent-device choose — **but see below** |
 | `agentDevice.android.app` / `.device` | Android package id; device empty = let agent-device choose |
 | `build.iosCommand` / `.androidCommand` | reported when the app is not installed — never run automatically |
 | `auth.testIds.{email,password,submit}` | login fields |
@@ -397,6 +407,14 @@ or `.claude/mobile-qa.local.json`, which the `.gitignore` rules keep ignored.
 
 **Driver quirks are no longer configured here.** Simulator UDIDs, coordinate
 scaling and IME package names moved to agent-device's own target selection.
+
+> **`agentDevice.ios.device` is not safely optional on a developer's Mac.**
+> `agent-device devices` counts **paired physical devices as `booted=true`**, so
+> one booted simulator plus two paired iPhones reports
+> `target-app-device: 3 matched` and blocks the run before it starts. Leaving the
+> key empty only works on a machine with nothing paired. Fill it with the
+> simulator's **name** (`"iPhone 17 Pro"`) rather than a UDID — the name survives
+> recreating the simulator.
 
 > **Schema change.** `ios.bundleId` / `android.package` became
 > `agentDevice.ios.app` / `agentDevice.android.app`. `mobile-qa-preflight`
@@ -424,6 +442,18 @@ Find candidates with:
 grep -rn 'testID=' app/ components/
 ```
 
+> **On Android, do not let a marker set rest on `testID` alone.** `testID`
+> reaches the driver as the `identifier` field of `snapshot -i --json` — the
+> plain-text snapshot omits it — and that field is **not reliably populated**.
+> Two runs disagreed: on a release-type build the app's own views exposed
+> `"identifier":"notification-btn"` normally, while on a debug build every app
+> view had an **empty** `identifier` and only true native components (a
+> `FlatList`) carried one, forcing label-based targeting. Which behavior is
+> authoritative is unknown and is recorded here unresolved. The practical risk is
+> that `loggedInMarkers` silently fails to match and a logged-in session is read
+> as logged out, so keep a cross-check (a visible label, a screenshot) available
+> for Android.
+
 Also check that the marker is on the **first screen after login**, not behind
 tab navigation — a marker on a settings screen is absent from the first snapshot
 and makes a logged-in session look logged out.
@@ -439,7 +469,41 @@ on a device yet.
 QA runs **iOS and Android in parallel, always.** Never one side only. Launch both
 subagents in a single message so they execute concurrently.
 
-Suggested `max_turns`: simple check 15 / multi-step interaction 20 / full E2E 30.
+### Parallel requires a named session — the policy used to break itself
+
+Every driver command must carry `--session ios-qa` or `--session android-qa`.
+Both platforms default to the session name `default`, so running them in
+parallel — which this plugin *mandates* — made the second one fail outright:
+
+```
+Error (INVALID_ARGS): Session "default" is already bound to apple device "iPhone 17 Pro"
+```
+
+`close` followed by `open` can likewise fail with `DEVICE_IN_USE` unless the same
+`--session` is passed explicitly. Both agent files and all three skills now say so.
+
+### Turn budget — measured, and the earlier numbers were fiction
+
+The old guidance (15 / 20 / 30) was written before anything had been run. The
+first real sessions used **~90 driver commands against a 35-turn budget on iOS
+and ~60 against 35 on Android**.
+
+| Kind of run | Realistic `max_turns` |
+| --- | --- |
+| single screen check, environment already warm | 20 |
+| multi-step interaction (navigate, act, verify) | 35 |
+| full E2E across several screens | 50-60 |
+
+The structural point matters more than the numbers: **the overrun was driven by
+environment fights, not by the feature checks.** The two largest sinks were
+recovering a device setting that broke a picker flow (~20 commands) and driving a
+single duration picker (~15). The checks themselves cost a handful of commands
+each.
+
+Budget is therefore won in **preflight and setup determinism**, not by raising
+`max_turns` — a warmer, more deterministic start buys more than twenty extra
+turns of flailing. Both agents are instructed to treat a repeated environment
+fight as a budget emergency and mark the test `BLOCKED` rather than keep digging.
 
 Preconditions are handled by `mobile-qa-preflight all`.
 
@@ -492,3 +556,21 @@ Note what is **no longer** on the second list: tool gotchas. Text-entry chunking
 coordinate conversion and IME recovery were the plugin's main content under
 Mobile MCP. They now belong to agent-device, and restating them here would only
 create drift.
+
+### The one qualification the first real runs forced
+
+Both agent files gained a **"Field-verified driver discipline"** section, which
+looks like the tool gotchas this README just said belong elsewhere. The
+distinction is deliberate and worth holding onto:
+
+- **What the CLI does** — syntax, flags, ref semantics, text entry, gestures —
+  stays with agent-device. Still not documented here.
+- **What you may not trust about your own observations** — that a settled tap can
+  be a no-op, that an oversized rect makes a centre tap land on nothing, that a
+  stale ref resolves to the wrong element without erroring — is QA judgement, not
+  command documentation. It changes what counts as evidence, which is exactly
+  what this plugin owns.
+
+Each such item names the version it was seen on (`0.20.8`) and defers to the CLI
+on conflict. When the pin moves, re-check them; an item the driver has fixed
+should be deleted, not kept "just in case".

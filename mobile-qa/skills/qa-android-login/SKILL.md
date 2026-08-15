@@ -23,6 +23,10 @@ in *this* app, **what** counts as success, and **when to stop**.
 > If you find yourself reaching for `adb shell input` or `ime set`, stop — you
 > are fighting the driver. The old script was deleted; it is recoverable from
 > commit `fe4412c` of the daegyu-plugins repository if it is ever needed.
+> (Real runs since found one narrow case where agent-device's *own* coordinate
+> tap is still the answer: a node whose accessibility rect covers a whole row, so
+> its centre point is empty space. That is documented in the agent file, it never
+> means `adb shell input`, and it does not apply to login fields.)
 
 ---
 
@@ -30,6 +34,31 @@ in *this* app, **what** counts as success, and **when to stop**.
 
 Decide from the **first snapshot `open` already returned**. Do not spend a turn
 re-observing. If `auth.loggedInMarkers` are present, **skip this skill entirely**.
+
+Every command you run here still carries **`--session android-qa`**, like every
+other command in the run. iOS and Android QA execute in parallel and both default
+to session `default`, so an unnamed session fails with
+`Session "default" is already bound to ...`.
+
+### The skip is also a permanent blind spot — say so
+
+A persistently authenticated test account means this skill is skipped on **every**
+run. Across the first four real-device sessions it was skipped every single time,
+so `loginEntryMarkers`, `testIds`, `errorMarkers` and every login-screen defect
+went unexercised while the config's login section looked settled. Absence of
+failures there is absence of evidence, not evidence of correctness.
+
+Two obligations follow:
+
+- When you skip login, **state it in the report** — "login skipped (session
+  already authenticated); login markers remain unverified" — rather than letting
+  silence imply coverage.
+- When login itself is what is under test, a logged-out state must be reached
+  **deliberately**, by logging out through the app's own logout control. That is
+  the only method both safe and reversible. `adb shell pm clear <pkg>` would also
+  do it and is **forbidden** — it wipes all app data, not just the session, and
+  this agent does not mutate device state that other work depends on. If in-app
+  logout is unreachable, report `BLOCKED` and let a human decide.
 
 ---
 
@@ -129,6 +158,19 @@ On the **first run against a new app or a changed config**, confirm each marker
 against a real snapshot in both states, and report any that were wrong as a
 `CORRECTION` in the `## Learned` block. Prefer testID/role-based markers; treat
 bare text as provisional.
+
+**A testID marker can fail to match on Android for a reason that has nothing to
+do with the app's state.** `testID` surfaces as the `identifier` field of
+`snapshot -i --json` (the plain-text snapshot omits it entirely), and that field
+is not reliably populated: on a release-type build the app's views carried it
+normally, while on a debug build of the same app every app view had an **empty**
+`identifier` and only true native components exposed one. Which is authoritative
+is unknown.
+
+So a marker that "does not match" may mean *unmatched*, not *absent*. Re-read
+with `--json`, cross-check against a visible label or a screenshot before
+concluding you are logged out, and say which build type you were on. Marker
+configuration that depends on `identifier` **alone** is fragile here.
 
 ---
 
