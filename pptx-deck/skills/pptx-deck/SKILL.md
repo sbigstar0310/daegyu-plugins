@@ -33,9 +33,15 @@ grammar, which ships a "corporate" deck the user rejects. In that case:
   accent bar under it (`box(0.62, 1.55, 1.4, 0.045)`). The accent bar is a
   signature; don't omit it. Title slide uses a full-width thin rule instead.
 - **Bullets are plain** (not boxed). One text block, `•` prefix.
-- **One light band per slide** carries the key line: light gray (`#F3F4F6`) or
-  cream (`#FBF7F0`) fill, NO saturated fill, usually NO colored border. Vertically
-  centered text.
+- **At most one light band per slide**, and only when the slide has a real
+  takeaway worth emphasizing: light gray (`#F3F4F6`) or cream (`#FBF7F0`) fill, NO
+  saturated fill, usually NO colored border. Vertically centered text.
+- **A band is NOT required furniture.** Do not end every slide with one. A concept,
+  setup, or definition slide that is complete on its own ends with whitespace. If a
+  band appears on every slide, the emphasis is uniform and nothing is emphasized;
+  bands only read as "this is the conclusion" when they are rare. Before adding
+  one, ask: is there one sentence the audience should carry out of this slide, and
+  does it say something the bullets do not already say? If not, leave it out.
 - **Results use a diagram or chart**, not a giant hero number. Numbers go inline,
   bold, inside the band or the chart.
 - **Color only in borders and emphasized words.** Palette: ink `#1A2332`, blue
