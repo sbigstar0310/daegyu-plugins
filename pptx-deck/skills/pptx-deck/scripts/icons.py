@@ -66,24 +66,29 @@ def load_index(which):
 
 
 def score(name, tags, terms):
-    """Rank a candidate. An exact name match wins, then a name that starts with
-    the term, then a tag hit, then anything containing it."""
-    s = 0
+    """Rank a candidate. An exact name match wins, then a whole word of the name,
+    then a prefix, then a tag.
+
+    A bare substring match does not count. Allowing it made "gate" return the
+    brands frigate, kongregate and progate, which is worse than returning
+    nothing: a plausible looking list sends you off to place the wrong glyph.
+    So a substring only scores when it is a whole hyphen separated part of the
+    name, or the name starts with it.
+    """
+    sc = 0
     words = name.replace("-", " ").split()
     for t in terms:
         if name == t:
-            s += 100
+            sc += 100
         elif t in words:
-            s += 60
-        elif name.startswith(t):
-            s += 40
-        elif t in name:
-            s += 25
+            sc += 60
+        elif name.startswith(t) and len(t) >= 3:
+            sc += 35
         if any(t == tag for tag in tags):
-            s += 30
-        elif any(t in tag for tag in tags):
-            s += 12
-    return s
+            sc += 30
+        elif any(t in tag.split() for tag in tags):
+            sc += 18
+    return sc
 
 
 def bundled_names():
