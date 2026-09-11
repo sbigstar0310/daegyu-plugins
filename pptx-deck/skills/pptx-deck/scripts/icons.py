@@ -314,15 +314,44 @@ def cmd_add(a, kind):
 
 
 def cmd_sheet(a):
-    """One PNG of every bundled glyph with its name, so you can pick by eye."""
+    """A contact sheet, so you pick a glyph by looking at it rather than by its
+    name. With no arguments it shows everything already bundled. With names it
+    shows those, fetching any that are not bundled yet into a cache, which is the
+    middle step between search and add: search gives you candidate names, this
+    shows you what they look like, then you place the one that reads."""
     from PIL import Image, ImageDraw, ImageFont
     files = []
-    for sub in ("icons", "logos"):
-        d = os.path.join(ASSETS, sub)
-        if os.path.isdir(d):
-            files += sorted(os.path.join(d, f) for f in os.listdir(d) if f.endswith(".png"))
+    if a.names:
+        cache = os.path.join(ASSETS, ".cache")
+        for name in a.names:
+            local = next((p for p in (os.path.join(ASSETS, "icons", name + ".png"),
+                                      os.path.join(ASSETS, "logos", name + ".png"),
+                                      os.path.join(cache, name + ".png"))
+                          if os.path.exists(p)), None)
+            if local:
+                files.append(local)
+                continue
+            try:
+                svg, _url = fetch_svg(name, LUCIDE_SOURCES)
+                inked = recolour_lucide(svg, "#000000", "1.6")
+            except RuntimeError:
+                try:
+                    svg, _url = fetch_svg(name, SIMPLE_SOURCES)
+                    inked = recolour_simple(svg, "#000000")
+                except RuntimeError as e:
+                    sys.stderr.write("%s\n" % e)
+                    continue
+            os.makedirs(cache, exist_ok=True)
+            png = os.path.join(cache, name + ".png")
+            to_png(inked, png, 400)
+            files.append(png)
+    else:
+        for sub in ("icons", "logos"):
+            d = os.path.join(ASSETS, sub)
+            if os.path.isdir(d):
+                files += sorted(os.path.join(d, f) for f in os.listdir(d) if f.endswith(".png"))
     if not files:
-        sys.stderr.write("no bundled PNGs under %s\n" % ASSETS)
+        sys.stderr.write("nothing to draw\n")
         return 1
     cell, pad, label = 96, 18, 16
     cols = a.columns
@@ -347,6 +376,7 @@ def cmd_sheet(a):
     os.makedirs(os.path.dirname(os.path.abspath(a.out)) or ".", exist_ok=True)
     sheet.convert("RGB").save(a.out)
     print("wrote %s, %d glyphs in %d columns" % (a.out, len(files), cols))
+    print("Look at it before you place one. A name that sounds right often draws wrong.")
     return 0
 
 
@@ -369,7 +399,8 @@ def main():
             s.add_argument("--stroke", default="1.6",
                            help="Lucide ships 2, which reads heavy next to body text")
 
-    s = sub.add_parser("sheet", help="a contact sheet of every bundled glyph")
+    s = sub.add_parser("sheet", help="a contact sheet, of named glyphs or of the whole bundle")
+    s.add_argument("names", nargs="*", help="leave empty to show everything bundled")
     s.add_argument("--out", default="build/icon-sheet.png")
     s.add_argument("--columns", type=int, default=8)
 

@@ -238,6 +238,31 @@ def write_tokens(m, path):
     for s, n in sorted(m["sizes"].items(), reverse=True):
         if s not in named.values():
             a("#   %5.2f pt  %2d percent" % (s, 100 * n // total))
+    a("")
+    a("# ---------------------------------------------------------------- TODO")
+    a("# Everything above was measured. Everything below is the half a machine")
+    a("# cannot read, and it is the half that decides whether the deck is")
+    a("# accepted. Open eight to twelve of the rendered reference slides and fill")
+    a("# these in before you build anything. Matching the fonts and the colours")
+    a("# but not the grammar ships a corporate deck the presenter rejects.")
+    a("")
+    a("# How does this deck emphasise? Weight, size, a marker highlight, a colour?")
+    a("# Miss this and you will reach for a coloured band and be wrong.")
+    a('EMPHASIS = "TODO"')
+    a("")
+    a("# What does the reference never do? No accent colour, no bands, no rounded")
+    a("# corners, no shadows, no table header fill. More load bearing than the palette.")
+    a('FORBIDDEN = "TODO"')
+    a("")
+    a("# Each recurring layout: a name, the slide it came from, and real coordinates.")
+    a("# Lift the numbers from a measurement, never from looking at a thumbnail.")
+    a("#   \"two column\": dict(source_slide=4, left=(ML, 1.40, 4.20), right=(5.30, 1.40, 4.03)),")
+    a("ARCHETYPES = {}   # TODO")
+    a("")
+    a("# The real font files. The typesetting checks cannot run without them, and")
+    a("# LibreOffice substitutes a missing font in silence.")
+    a("# Already set above as FONT_FILES. Check both paths exist:")
+    a("#   python3 scripts/preflight.py --font '%s'" % font)
     with open(path, "w") as f:
         f.write("\n".join(lines) + "\n")
     return path
@@ -246,8 +271,13 @@ def write_tokens(m, path):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("ref")
-    ap.add_argument("-o", "--out", help="write a tokens.py here")
+    ap.add_argument("-o", "--out",
+                    help="a .py path to write tokens to, or a deck directory. Given a "
+                         "directory it writes <dir>/tokens.py and renders the reference "
+                         "into <dir>/ref/preview, because you have to look at it.")
     ap.add_argument("--render", help="render every reference slide into this directory")
+    ap.add_argument("--no-render", action="store_true",
+                    help="skip the render. You will then be guessing at the grammar.")
     ap.add_argument("--dpi", type=int, default=120)
     a = ap.parse_args()
 
@@ -273,15 +303,26 @@ def main():
     print("")
     print("named      %s" % ", ".join("%s %.1f" % (k, v) for k, v in sorted(named.items(), key=lambda kv: -kv[1])))
 
+    render_to = a.render
     if a.out:
-        os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
-        write_tokens(m, a.out)
-        print("\nwrote %s" % a.out)
+        if a.out.endswith(".py"):
+            tokens_path = os.path.abspath(a.out)
+        else:
+            # A deck directory. Tokens at the top, reference renders beside them,
+            # because the numbers alone are not enough to build from.
+            tokens_path = os.path.join(os.path.abspath(a.out), "tokens.py")
+            if render_to is None and not a.no_render:
+                render_to = os.path.join(os.path.abspath(a.out), "ref", "preview")
+        os.makedirs(os.path.dirname(tokens_path), exist_ok=True)
+        write_tokens(m, tokens_path)
+        print("\nwrote %s" % tokens_path)
 
-    if a.render:
+    if a.no_render:
+        render_to = None
+    if render_to:
         here = os.path.dirname(os.path.abspath(__file__))
         r = subprocess.run([sys.executable, os.path.join(here, "render_real.py"),
-                            os.path.abspath(a.ref), "-o", a.render, "--dpi", str(a.dpi)],
+                            os.path.abspath(a.ref), "-o", render_to, "--dpi", str(a.dpi)],
                            capture_output=True, text=True)
         sys.stdout.write(r.stdout)
         sys.stderr.write(r.stderr)
@@ -289,6 +330,9 @@ def main():
     print("\nNow look at the slides. The numbers above are measured and the names")
     print("are a guess, and the grammar, what goes above the title, whether bullets")
     print("are boxed, where emphasis is allowed, is not in the XML at all.")
+    if a.out:
+        print("Then fill in EMPHASIS, FORBIDDEN and ARCHETYPES at the bottom of the")
+        print("tokens file. Those three are what gets a deck accepted.")
     return 0
 
 
