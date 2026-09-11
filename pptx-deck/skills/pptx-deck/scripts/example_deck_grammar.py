@@ -8,6 +8,7 @@ and the TA cold-start parquet (data distribution). Font = Roboto.
     <pptvenv>/bin/python ppt/deck2.py
 """
 import os
+import sys
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -16,6 +17,21 @@ from matplotlib.patches import Rectangle, FancyBboxPatch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIG = os.path.join(HERE, "build", "fig")
+
+
+def _sample_arrays():
+    """The real arrays if they are on disk, otherwise plausible stand-ins so the
+    example runs anywhere. Never copy this into a real deck: a chart on a slide
+    must come from measured data, and a stand-in that reaches an audience is a
+    fabricated result."""
+    mk_p = os.path.join(FIG, "mk.npy")
+    lens_p = os.path.join(FIG, "lens.npy")
+    if os.path.exists(mk_p) and os.path.exists(lens_p):
+        return np.load(mk_p), np.load(lens_p)
+    print("example_deck_grammar: no build/fig/*.npy, drawing the charts from "
+          "sample numbers so the example still runs.")
+    rng = np.random.default_rng(0)
+    return rng.poisson(12, 900), rng.normal(520, 210, 900).clip(20, 1400)
 os.makedirs(FIG, exist_ok=True)
 
 C_INK, C_MUTE, C_ACC = "#1a2332", "#5b6372", "#2563eb"
@@ -62,7 +78,11 @@ def fig_marker(path):
 
 
 def fig_data(path):
-    mk = np.load(os.path.join(FIG, "mk.npy")); lens = np.load(os.path.join(FIG, "lens.npy"))
+    # This example shipped without its data, so running it failed on the first
+    # line of the first figure. The point of a worked deck is that it runs, so
+    # stand-in numbers are generated when the real arrays are absent. Anything
+    # drawn from them is shape, not evidence.
+    mk, lens = _sample_arrays()
     fig, axes = plt.subplots(2, 1, figsize=(5.4, 4.3))
     ax = axes[0]
     ax.hist(np.clip(mk, 0, 40), bins=range(0, 42, 2), color=C_ACC, alpha=0.85, edgecolor="white")
@@ -252,7 +272,7 @@ def build(prs):
          ("Cold-start SFT: teaching LLaDA to place a bare <thinkanywhere> marker", True, ACC), 20)
     para(tbox(s, MARGIN, 3.75, 11.9, 0.6).text_frame,
          ("Last time, placement mattered. This time, we teach the model where to place it.", False, MUTE), 16)
-    para(tbox(s, MARGIN, 6.85, 11.9, 0.4).text_frame, ("Daegyu Seong · MLAI, KAIST · 26.07.22", False, MUTE), 13)
+    para(tbox(s, MARGIN, 6.85, 11.9, 0.4).text_frame, ("Daegyu Seong, MLAI, KAIST, 26.07.22", False, MUTE), 13)
 
     # ---------- S2 RECAP ----------
     s = slide_new(prs); header(s, "Where we left off: placement matters, now learn it", "Recap")
@@ -266,7 +286,7 @@ def build(prs):
         [("This talk is step (1): a cold-start SFT that teaches the model ", False, INK),
          ("where to place its thinking", True, INK), (".", False, INK)]], sizes=[18])
     para(tbox(s, MARGIN, 6.3, 12, 0.4).text_frame,
-         ("Deck 1 · LLaDA-8B · GSM8K · n=200 · distance D 0 to 512.", False, MUTE), 12)
+         ("Deck 1, LLaDA-8B, GSM8K, n=200, distance D 0 to 512.", False, MUTE), 12)
 
     # ---------- S3 IDEA (marker-only) ----------
     s = slide_new(prs); header(s, "Teach WHERE, not WHAT: a marker-only SFT", "Cold start")
@@ -311,7 +331,7 @@ def build(prs):
     pic(s, os.path.join(FIG, "fig_process.png"), top=1.85, height=3.3, left=0.6)
     tf6 = tbox(s, MARGIN, 5.25, 11.93, 0.75).text_frame
     para(tf6, [("precision = TP / (TP + FP)        recall = TP / (TP + FN)        "
-                "F1 = 2 · precision · recall / (precision + recall)", False, MUTE)], 12, after=4)
+                "F1 = 2 × precision × recall / (precision + recall)", False, MUTE)], 12, after=4)
     para(tf6, [("Masking follows the eval loss (Bernoulli t, t in [0.7, 0.95]); leak-free recall counts "
                 "fully-masked trigrams only.", False, MUTE)], 11, new=True)
     band(s, MARGIN, 6.15, 11.93, 0.7, [
@@ -319,7 +339,7 @@ def build(prs):
          ("degeneracy signal", True, INK), (".", False, INK)]], fill=WARN, sizes=[15])
 
     # ---------- S7 RESULT: placement ----------
-    s = slide_new(prs); header(s, "The SFT learns placement: F1 rises 0.53 to 0.80", "Result · placement")
+    s = slide_new(prs); header(s, "The SFT learns placement: F1 rises 0.53 to 0.80", "Result, placement")
     pic(s, os.path.join(FIG, "fig_place.png"), top=1.75, height=3.7, left=0.7)
     tf = tbox(s, 7.75, 2.6, 4.85, 3.0).text_frame
     para(tf, ("Precision is the tell.", True, INK), 16, after=10)
@@ -330,10 +350,10 @@ def build(prs):
         [("F1 rises from 0.53 at base to 0.80 at ep10. Precision 0.47 to 0.80, recall 0.60 to 0.79.", False, INK)]],
         sizes=[15])
     para(tbox(s, MARGIN, 6.72, 12, 0.3).text_frame,
-         ("b64 SFT · t in [0.7, 0.95] · val 100 · anchor 'any' (id 1496).", False, MUTE), 11)
+         ("b64 SFT, t in [0.7, 0.95], val 100, anchor 'any' (id 1496).", False, MUTE), 11)
 
     # ---------- S8 RESULT: Q2 ----------
-    s = slide_new(prs); header(s, "Markers don't hurt coding: the drop is prompt cost", "Result · Q2")
+    s = slide_new(prs); header(s, "Markers don't hurt coding: the drop is prompt cost", "Result, Q2")
     small_table(s, 2.42, 1.85, 8.5, ["MBPP pass@1", "d1 prompt", "marker prompt"],
                 [["base", "38.5", "30.4"], ["SFT ep2", "-", "5.4"],
                  ["SFT ep6", "-", "29.6"], ["SFT ep10", ep10, "30.7"]],
@@ -348,7 +368,7 @@ def build(prs):
         [("Coding ability holds and placement is learned. ", False, INK),
          ("Q1 and Q2 are both met", True, INK), (".", False, INK)]], sizes=[16])
     para(tbox(s, MARGIN, 6.78, 12, 0.3).text_frame,
-         ("d1 harness · gen256 / steps128 / block32 · MBPP sanitized 257 · greedy · markers stripped before scoring.", False, MUTE), 11)
+         ("d1 harness, gen256 / steps128 / block32, MBPP sanitized 257, greedy, markers stripped before scoring.", False, MUTE), 11)
 
     # ---------- S9 TAKEAWAY ----------
     s = slide_new(prs); header(s, "Cold-start done: the model learned WHERE", "Takeaway")
@@ -365,15 +385,21 @@ def build(prs):
 
 
 def main():
+    # Output goes where you ask, and otherwise to the current directory. It used
+    # to land inside the skill folder, which is how people end up reviewing a
+    # render from someone else's run.
+    global FIG
+    out = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "example_deck.pptx")
+    FIG = os.path.join(os.path.dirname(out) or ".", "fig")
+    os.makedirs(FIG, exist_ok=True)
     fig_marker(os.path.join(FIG, "fig_marker.png"))
     fig_data(os.path.join(FIG, "fig_data.png"))
     fig_process(os.path.join(FIG, "fig_process.png"))
     fig_place(os.path.join(FIG, "fig_place.png"))
     prs = Presentation(); prs.slide_width = W; prs.slide_height = H
     build(prs)
-    out = os.path.join(HERE, "build", "deck2.pptx")
     prs.save(out)
-    print("saved", out, "slides:", len(prs.slides._sldIdLst))
+    print("saved %s, %d slides" % (out, len(prs.slides)))
 
 
 if __name__ == "__main__":

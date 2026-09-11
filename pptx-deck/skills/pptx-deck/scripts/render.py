@@ -322,6 +322,13 @@ class Deck:
             for i, line in enumerate(fn):
                 p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
                 _apply_runs(p, [{"text": line, "size": D.SZ_FOOT, "color": "gray"}], D.SZ_FOOT)
+
+        if spec.get("notes"):
+            slide.notes_slide.notes_text_frame.text = spec["notes"].strip()
+        if spec.get("hidden"):
+            # Stays in the file, and out of both the slideshow and the exported
+            # PDF. Still reachable during the talk by typing its slide number.
+            slide._element.set("show", "0")
         return slide
 
 

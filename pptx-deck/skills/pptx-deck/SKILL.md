@@ -447,6 +447,7 @@ exported PDF, still reachable by typing the slide number.
 - `references/paper-talk.md`, presenting someone else's paper.
 - `references/troubleshooting.md`, tool traps that each cost real time.
 - `references/instance-white-ref.md`, the bundled white default.
+- `references/evidence-rules.md`, what a number on a slide has to satisfy.
 - `assets/tokens_white.py` and `assets/starter_build.py`, the default instance.
 - `assets/icons/`, `assets/logos/`, `assets/index/`, bundled art and search indexes.
 - `scripts/preflight.py`, `extract_ref.py`, `deck_lib.py`, `render_real.py`,

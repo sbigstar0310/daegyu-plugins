@@ -3,7 +3,7 @@
 Extracted from the first presentation (docs/ppt/Intro.pptx) so the follow-up
 deck stays visually aligned. Fonts/colors were read out of the actual slide XML
 run properties (the theme XML still carries the default Highcharts palette; the
-author overrode it per-run, so THESE values — not the theme — are the truth).
+author overrode it per-run, so THESE values, not the theme, are the truth).
 
 Slide size: 12191675 x 6858000 EMU = 13.33 x 7.5 in = 16:9 widescreen.
 Font: Roboto dominates (816 runs) vs Arial/Calibri leftovers -> primary = Roboto.

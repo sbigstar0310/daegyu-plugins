@@ -13,19 +13,62 @@ DPI = 96
 W = int(D.SLIDE_W * DPI)
 H = int(D.SLIDE_H * DPI)
 
-_AR = "/usr/share/fonts/truetype/msttcorefonts/arial.ttf"
-_ARB = "/usr/share/fonts/truetype/msttcorefonts/arialbd.ttf"
-_ARI = "/usr/share/fonts/truetype/msttcorefonts/ariali.ttf"
-_MONO = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+# The proxy font. The first of these that exists wins, so this runs on macOS as
+# well as on Linux. It used to name Linux paths only and threw ImportError-shaped
+# nonsense on a Mac before drawing anything.
+_CANDIDATES = {
+    "regular": [
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial.ttf",
+        "/usr/share/fonts/truetype/msttcorefonts/arial.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+    ],
+    "bold": [
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/Library/Fonts/Arial Bold.ttf",
+        "/usr/share/fonts/truetype/msttcorefonts/arialbd.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ],
+    "italic": [
+        "/System/Library/Fonts/Supplemental/Arial Italic.ttf",
+        "/usr/share/fonts/truetype/msttcorefonts/ariali.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
+    ],
+    "mono": [
+        "/System/Library/Fonts/Menlo.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+    ],
+}
 _cache = {}
+_path_cache = {}
+_warned = set()
+
+
+def _font_path(kind):
+    if kind not in _path_cache:
+        _path_cache[kind] = next((p for p in _CANDIDATES[kind] if os.path.exists(p)), None)
+    return _path_cache[kind]
 
 
 def _font(size_pt, bold=False, mono=False, italic=False):
     px = int(size_pt * DPI / 72)
     key = (px, bold, mono, italic)
     if key not in _cache:
-        path = _MONO if mono else (_ARB if bold else (_ARI if italic else _AR))
-        _cache[key] = ImageFont.truetype(path, px)
+        kind = "mono" if mono else ("bold" if bold else ("italic" if italic else "regular"))
+        path = _font_path(kind) or _font_path("regular")
+        if path is None:
+            if kind not in _warned:
+                _warned.add(kind)
+                print("preview.py: no proxy font found, falling back to PIL's bitmap "
+                      "default. Widths in this preview mean nothing.")
+            _cache[key] = ImageFont.load_default()
+        else:
+            _cache[key] = ImageFont.truetype(path, px)
     return _cache[key]
 
 

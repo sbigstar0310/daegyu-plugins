@@ -38,6 +38,8 @@ EMU = 914400.0
 EPS = 0.02          # inches. Two boxes closer than this are touching, not overlapping.
 GAP_BUDGET = 1.20   # inches of dead vertical space before a slide looks unfinished.
 MIN_PT = 8.0        # nothing below this is readable from the back of a room.
+# This is the only file in the skill allowed to contain these two characters,
+# because they are what it looks for. Do not "clean" them out.
 BANNED = {"—": "em dash", "·": "middle dot separator"}
 
 TABLE = 19  # MSO_SHAPE_TYPE.TABLE
