@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "daegyu-plugins",
-  "description": "Personal Claude Code plugins by sbigstar0310 (notion-manager, progress, pptx-deck, mobile-qa)",
+  "description": "Personal Claude Code plugins by sbigstar0310 (notion-manager, progress, pptx-deck, mobile-qa, work-style)",
   "owner": {
     "name": "sbigstar0310"
   },
@@ -9,30 +9,47 @@
     {
       "name": "notion-manager",
       "description": "Notion workspace manager - Daily Log, TODO, experiment reports",
-      "author": { "name": "sbigstar0310" },
+      "author": {
+        "name": "sbigstar0310"
+      },
       "category": "productivity",
       "source": "./notion-manager"
     },
     {
       "name": "progress",
       "description": "Live status of long-running jobs - ETA-first, discovered from tmux/logs/GPU",
-      "author": { "name": "sbigstar0310" },
+      "author": {
+        "name": "sbigstar0310"
+      },
       "category": "productivity",
       "source": "./progress"
     },
     {
       "name": "pptx-deck",
       "description": "Design-aligned .pptx deck builder with faithful PNG previews",
-      "author": { "name": "sbigstar0310" },
+      "author": {
+        "name": "sbigstar0310"
+      },
       "category": "productivity",
       "source": "./pptx-deck"
     },
     {
       "name": "mobile-qa",
       "description": "Parallel iOS + Android GUI QA subagents for any React Native / Expo app, driven by a pinned Callstack agent-device",
-      "author": { "name": "sbigstar0310" },
+      "author": {
+        "name": "sbigstar0310"
+      },
       "category": "testing",
       "source": "./mobile-qa"
+    },
+    {
+      "name": "work-style",
+      "description": "Working style injected at every session start - main session keeps the conversation flowing, slow work goes to the background, independent work runs in parallel subagents",
+      "author": {
+        "name": "sbigstar0310"
+      },
+      "category": "productivity",
+      "source": "./work-style"
     }
   ]
 }

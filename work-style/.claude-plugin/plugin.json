@@ -1,0 +1,6 @@
+{
+  "name": "work-style",
+  "version": "1.0.0",
+  "description": "How the main session works: it keeps the conversation flowing, pushes slow and sizeable work to the background and to subagents, runs independent work in parallel, and reports it without confusing the user. Injected at every session start.",
+  "author": { "name": "daegyu" }
+}

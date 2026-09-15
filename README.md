@@ -10,6 +10,7 @@ Personal Claude Code plugins by [@sbigstar0310](https://github.com/sbigstar0310)
 | `progress` | Live status of long-running jobs — ETA-first, discovered from tmux/logs/GPU |
 | `pptx-deck` | Design-aligned `.pptx` deck builder with faithful PNG previews |
 | `mobile-qa` | Parallel iOS + Android GUI QA subagents for React Native / Expo apps |
+| `work-style` | Working style injected at every session start — main session keeps the conversation flowing, slow work goes to the background, independent work runs in parallel subagents |
 
 ## Install
 
@@ -24,6 +25,7 @@ In a Claude Code session:
 /plugin install progress@daegyu-plugins
 /plugin install pptx-deck@daegyu-plugins
 /plugin install mobile-qa@daegyu-plugins
+/plugin install work-style@daegyu-plugins
 ```
 
 Or from a shell:
