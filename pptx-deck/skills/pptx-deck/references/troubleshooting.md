@@ -23,8 +23,13 @@ locally first: a key may already sit in the environment or in a provider file.
 `/Applications/LibreOffice.app/Contents/Resources/fonts/truetype` before the first
 render, or every line break you check is fiction.
 
-**Hidden slides shift the page index.** A deck that hides its appendix exports
-fewer PDF pages than it has slides, so page N is not slide N. Print the map.
+**Hidden slides shift the page index.** `render_real.py` renders hidden slides, so
+there page N is slide N. Any export that leaves them out, `--skip-hidden`, PowerPoint
+or a plain `soffice --convert-to pdf`, has fewer pages than slides, so page N is not
+slide N. Print the map. Exporting hidden slides from the command line needs
+LibreOffice 7.4 or newer, and Ubuntu 22.04 and Debian 11 ship older ones. On those,
+`render_real.py` warns that the hidden slides were left out and falls back to the
+map.
 
 **A render older than the deck is not evidence.** Check mtimes before reporting.
 A stale PNG showing a title that no longer exists has been reviewed as current.

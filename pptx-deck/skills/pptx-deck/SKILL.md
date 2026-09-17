@@ -423,7 +423,8 @@ geometry fixes yourself.
 The deck is one of several artifacts. Ask which the talk needs, and keep them in
 sync on every build.
 
-- `deck.pptx` and `deck.pdf`, in the project folder beside the reference.
+- `deck.pptx` and `deck.pdf`, in the project folder beside the reference. Make the
+  PDF with `render_real.py --skip-hidden --keep-pdf`, so the appendix stays out.
 - `render/`, the contact sheet plus a 200 dpi PNG per slide.
 - **Speaker notes inside the pptx**, one block per slide, written as you build.
 - **A rehearsal script derived from the notes**, never from the content doc, which
@@ -437,7 +438,9 @@ sync on every build.
 
 **Appendix slides are hidden, not deleted.** Call it Appendix, never Backup. Hide
 with `slide._element.set("show", "0")`: excluded from the slideshow and from the
-exported PDF, still reachable by typing the slide number.
+exported PDF, still reachable by typing the slide number. `render_real.py` renders
+them anyway, so the appendix is checked like any other slide. For the handout PDF,
+pass `--skip-hidden --keep-pdf`.
 
 ---
 

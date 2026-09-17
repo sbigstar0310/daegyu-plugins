@@ -30,3 +30,10 @@ package = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers"]
+# PyMuPDF's SWIG bindings warn on import under Python 3.12+. Nothing here can fix that.
+filterwarnings = [
+    "ignore:builtin type (SwigPyPacked|SwigPyObject|swigvarlink) has no __module__ attribute:DeprecationWarning",
+]
+markers = [
+    "libreoffice: renders with the real LibreOffice, so it takes seconds and needs soffice",
+]
