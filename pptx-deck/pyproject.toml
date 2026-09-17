@@ -1,0 +1,32 @@
+# The Python environment for the pptx-deck scripts and their tests, managed by uv.
+# This is not a package: nothing here is built or installed, only the environment.
+#
+#     uv sync --directory pptx-deck             # .venv with the scripts' libraries and the dev group
+#     uv run --directory pptx-deck pytest
+#
+# The plugin's version lives in .claude-plugin/plugin.json, not here.
+[project]
+name = "pptx-deck"
+version = "0.0.0"
+description = "Scripts for the pptx-deck skill: build, render and measure a .pptx."
+requires-python = ">=3.9"
+dependencies = [
+    "python-pptx>=1.0",
+    "pillow>=8.0",
+    "lxml>=4.9",
+    "pymupdf>=1.23",
+]
+
+[dependency-groups]
+# Tests only. fontTools writes the test fonts; the skill never imports it.
+dev = [
+    "pytest>=8.0",
+    "fonttools>=4.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers"]

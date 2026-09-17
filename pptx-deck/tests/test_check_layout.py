@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """Tests for the height and font arithmetic in check_layout.py and fix_orphans.py.
 
-    python3 -m pip install -r pptx-deck/requirements-dev.txt
-    python3 -m pytest pptx-deck
+    uv run --directory pptx-deck pytest
 
 Every expected number can be worked by hand. The test fonts make each character
 half an em wide, so at 12 pt a character is 6 pt, "line 10 of ten" is 84 pt, and

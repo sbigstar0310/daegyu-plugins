@@ -1,9 +1,0 @@
-# What the tests need: the skill's own libraries, pytest, and fontTools to write
-# the test fonts. The skill itself never imports fontTools or pytest.
-#
-#     python3 -m pip install -r pptx-deck/requirements-dev.txt
-#     python3 -m pytest pptx-deck
-python-pptx>=1.0
-pillow>=8.0
-fonttools>=4.0
-pytest>=8.0
