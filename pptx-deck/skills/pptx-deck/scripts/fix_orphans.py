@@ -21,6 +21,10 @@ because PowerPoint's metrics differ a little from PIL's. A paragraph that is one
 wrap away from breaking is reported too: those are the ones that look fine in
 LibreOffice and break on the presenter's machine.
 
+Exit code 1 means an orphan is left. 2 means something could not be measured: the
+--font has no file, or a paragraph asks for a font that has none. A paragraph that
+was not measured is listed, never counted as clean.
+
 The measuring helpers are importable. check_layout.py uses them.
 """
 import argparse
@@ -46,46 +50,104 @@ WEIGHT_NAMES = {False: ["Regular", "Book", "Roman", ""], True: ["Bold", "Semibol
 
 _font_cache = {}
 _file_cache = {}
+_name_table = None
 
 
-def font_file(family, bold):
-    """The file on disk for one family and weight, or None."""
-    key = (family, bool(bold))
-    if key in _file_cache:
-        return _file_cache[key]
-    flat = family.replace(" ", "").lower()
-    found = None
+def _font_paths():
+    seen = set()
     for d in FONT_DIRS:
         d = os.path.expanduser(d)
         if not os.path.isdir(d):
             continue
         for root, _dirs, files in os.walk(d):
             for f in files:
-                if not f.lower().endswith((".otf", ".ttf", ".ttc")):
-                    continue
-                stem = os.path.splitext(f)[0].replace(" ", "").replace("-", "").lower()
-                if not stem.startswith(flat):
-                    continue
-                tail = stem[len(flat):]
-                for want in WEIGHT_NAMES[bool(bold)]:
-                    w = want.replace(" ", "").lower()
-                    if tail == w or (w and tail.startswith(w)):
-                        # "Bold" must not match "BoldItalic", and regular must not
-                        # match "Light" or "Italic".
-                        if "italic" in tail or "oblique" in tail:
-                            continue
-                        if not bold and tail not in ("", "regular", "book", "roman"):
-                            continue
-                        found = os.path.join(root, f)
-                        break
-                if found:
-                    break
-            if found:
+                path = os.path.join(root, f)
+                # A listed directory can sit inside another one, as Supplemental
+                # does inside /System/Library/Fonts.
+                if f.lower().endswith((".otf", ".ttf", ".ttc")) and path not in seen:
+                    seen.add(path)
+                    yield path
+
+
+def _flat(name):
+    return re.sub(r"[\s_-]", "", name or "").lower()
+
+
+def _by_file_name(family, bold):
+    """(rank, path) for the best file whose name gives the family and weight, or
+    None. rank is the weight's place in WEIGHT_NAMES, so Bold beats SemiBold."""
+    flat = _flat(family)
+    wants = [_flat(w) for w in WEIGHT_NAMES[bool(bold)]]
+    best = None
+    for path in _font_paths():
+        stem = _flat(os.path.splitext(os.path.basename(path))[0])
+        if not stem.startswith(flat):
+            continue
+        tail = stem[len(flat):]
+        # "Bold" must not match "BoldItalic", and regular must not match "Light"
+        # or "Italic".
+        if "italic" in tail or "oblique" in tail:
+            continue
+        if not bold and tail not in ("", "regular", "book", "roman"):
+            continue
+        for rank, w in enumerate(wants):
+            if tail == w or (w and tail.startswith(w)):
+                if best is None or rank < best[0]:
+                    best = (rank, path)
                 break
-        if found:
-            break
-    _file_cache[key] = found
-    return found
+    return best
+
+
+def _by_name_table(family, bold):
+    """(rank, path) matched on the family and style the font file declares, which
+    is what a renderer matches on. Opening every font costs a fraction of a second,
+    so the table is read once per process."""
+    global _name_table
+    if _name_table is None:
+        _name_table = []
+        for path in _font_paths():
+            try:
+                fam, style = ImageFont.truetype(path, 10).getname()
+            except (OSError, ValueError):
+                continue
+            fam, style = _flat(fam), _flat(style)
+            _name_table.append((path, fam, style))
+            # FreeType reports the typographic family, "Inter" and "Medium". A deck
+            # saved on Windows names the legacy one, "Inter Medium" and "Regular".
+            if style not in ("regular", "bold", "italic", "bolditalic") \
+                    and "italic" not in style and "oblique" not in style:
+                _name_table.append((path, fam + style, "regular"))
+    wants = [_flat(w) for w in WEIGHT_NAMES[bool(bold)]]
+    best = None
+    for path, fam, style in _name_table:
+        if fam == _flat(family) and style in wants:
+            rank = wants.index(style)
+            if best is None or rank < best[0]:
+                best = (rank, path)
+    return best
+
+
+def font_file(family, bold):
+    """The file on disk for one family and weight, or None. File names are tried
+    first. The name table inside each font is read when they find nothing, or only
+    a lesser weight: a file whose name says nothing, like the hashed names the
+    Google Fonts CDN serves, is found by the family and style inside it."""
+    key = (family, bool(bold))
+    if key not in _file_cache:
+        best = _by_file_name(family, bold)
+        if best is None or best[0] > 0:
+            named = _by_name_table(family, bold)
+            if named is not None and (best is None or named[0] < best[0]):
+                best = named
+        _file_cache[key] = best[1] if best else None
+    return _file_cache[key]
+
+
+def missing_fonts(toks):
+    """{(family, bold)} a paragraph needs and has no file for. lines() returns None
+    for such a paragraph, and a caller that skips it must say so."""
+    return {(family, bool(bold)) for _w, bold, family in toks
+            if font_file(family, bold) is None}
 
 
 def font(family, bold, size_pt):
@@ -182,7 +244,7 @@ def fill_ratio(toks, size_pt, width_pt):
     return max(ls) / width_pt if width_pt else 0.0
 
 
-def _paragraphs(prs, default_family, skip_first):
+def paragraphs(prs, default_family, skip_first):
     for si, slide in enumerate(prs.slides):
         if skip_first and si == 0:
             continue
@@ -203,7 +265,7 @@ def report(prs, default_family="Inter", min_ratio=0.34, skip_first=True,
     kind is "orphan" for a short last line that is already there, and "at risk"
     for one that appears as soon as the metrics shift slightly."""
     out = []
-    for n, shape, p, toks in _paragraphs(prs, default_family, skip_first):
+    for n, shape, p, toks in paragraphs(prs, default_family, skip_first):
         size = p.runs[0].font.size.pt
         pw = para_width(shape, p)
         bad, count = orphan(toks, size, pw, min_ratio)
@@ -318,14 +380,31 @@ def main():
         prs = Presentation(out)
 
     rows = report(prs, a.font, a.min_ratio, skip_first, a.fill_risk)
-    if not rows:
+    # A paragraph in a font with no file was never measured, so it did not pass.
+    missed = {}
+    unmeasured = 0
+    for n, _shape, _p, toks in paragraphs(prs, a.font, skip_first):
+        keys = missing_fonts(toks)
+        unmeasured += bool(keys)
+        for key in keys:
+            missed.setdefault(key, []).append(n)
+    if not rows and not missed:
         print("no orphans, no paragraphs at risk")
         return 0
     for n, text, kind in rows:
         print("  slide %-3d %-8s %s" % (n, kind, text[:70]))
+    for (family, bold), found_on in sorted(missed.items()):
+        slides = sorted(set(found_on))
+        print('  not measured: %d paragraph%s, font "%s"%s not found, on slide%s %s'
+              % (len(found_on), "" if len(found_on) == 1 else "s", family,
+                 " bold" if bold else "", "" if len(slides) == 1 else "s",
+                 ", ".join(str(s) for s in slides)))
     n_orphan = sum(1 for r in rows if r[2] == "orphan")
-    print("%d orphan, %d at risk" % (n_orphan, len(rows) - n_orphan))
-    return 1 if n_orphan else 0
+    print("%d orphan, %d at risk%s" % (n_orphan, len(rows) - n_orphan,
+                                       ", %d not measured" % unmeasured if missed else ""))
+    if n_orphan:
+        return 1
+    return 2 if missed else 0
 
 
 if __name__ == "__main__":

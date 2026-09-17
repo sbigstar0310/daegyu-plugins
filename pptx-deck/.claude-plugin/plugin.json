@@ -1,6 +1,6 @@
 {
   "name": "pptx-deck",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Builds a .pptx that matches a reference deck, then verifies it by measuring a real render: layout, line breaks, type scale. Bundles icons, a default instance, and the paper-figure and formula pipelines.",
   "author": { "name": "daegyu" }
 }

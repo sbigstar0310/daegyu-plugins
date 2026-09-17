@@ -23,6 +23,10 @@ really does layer boxes can say so in the file:
 
     shp.name = "allow: the arrow crosses the band on purpose"
 
+overflow and orphans measure with the deck's font file. A frame whose font has no
+file on this machine is not measured, and is not passed either: each missing font
+gets a WARN that counts the frames it left out, so --strict fails on it.
+
 --lang-check is off by default. It looks for the characters that make a deck read
 as machine written: the em dash and the middle dot used as a separator.
 """
@@ -38,6 +42,10 @@ EMU = 914400.0
 EPS = 0.02          # inches. Two boxes closer than this are touching, not overlapping.
 GAP_BUDGET = 1.20   # inches of dead vertical space before a slide looks unfinished.
 MIN_PT = 8.0        # nothing below this is readable from the back of a room.
+# A single-spaced line is 1.2 x the font size in PowerPoint and in LibreOffice,
+# and a proportional line spacing multiplies that, not the bare size. LibreOffice
+# draws 12 pt at 1.0 on a 14.40 pt pitch and 7.5 pt at 1.15 on 10.35.
+LINE_EM = 1.2
 # This is the only file in the skill allowed to contain these two characters,
 # because they are what it looks for. Do not "clean" them out.
 BANNED = {"—": "em dash", "·": "middle dot separator"}
@@ -81,6 +89,34 @@ def is_plain_textbox(shape):
     return True
 
 
+def para_height(p, size, n_lines, first, last):
+    """Points one paragraph takes: its lines at their pitch, and the space before
+    and after it. A spacing in points is the pitch itself. Both renderers drop the
+    space before the first paragraph of a frame and after the last one."""
+    spacing = p.line_spacing
+    if spacing is None:
+        pitch = size * LINE_EM
+    elif isinstance(spacing, float):
+        pitch = size * LINE_EM * spacing
+    else:
+        pitch = spacing.pt
+    before = p.space_before.pt if p.space_before is not None and not first else 0
+    after = p.space_after.pt if p.space_after is not None and not last else 0
+    return n_lines * pitch + before + after
+
+
+def warn_unmeasured(rep, check, missed):
+    """missed is {(family, bold): {(slide, shape_id)}}. A frame that could not be
+    measured is not a frame that passed, so each missing font gets a line."""
+    for (family, bold), frames in sorted(missed.items()):
+        slides = sorted({n for n, _id in frames})
+        rep.add("WARN", check, None,
+                '%d frame%s not measured: font "%s"%s not found, on slide%s %s'
+                % (len(frames), "" if len(frames) == 1 else "s", family,
+                   " bold" if bold else "", "" if len(slides) == 1 else "s",
+                   ", ".join(str(n) for n in slides)))
+
+
 def ink_box(shape, family):
     """The box the shape actually covers. For a plain text box that is the text
     extent, placed inside the frame according to its alignment and anchor. Falls
@@ -100,7 +136,8 @@ def ink_box(shape, family):
     height = 0.0
     centred = False
     right_aligned = False
-    for p in tf.paragraphs:
+    paras = tf.paragraphs
+    for k, p in enumerate(paras):
         if not p.runs or p.runs[0].font.size is None:
             return l, t, r, b
         size = p.runs[0].font.size.pt
@@ -111,9 +148,7 @@ def ink_box(shape, family):
         if ls is None:
             return l, t, r, b
         widest = max(widest, max(ls) / 72.0)
-        spacing = p.line_spacing if isinstance(p.line_spacing, float) else 1.2
-        after = p.space_after.pt if p.space_after is not None else 0
-        height += (len(ls) * size * spacing + after) / 72.0
+        height += para_height(p, size, len(ls), k == 0, k == len(paras) - 1) / 72.0
         if p.alignment is not None:
             centred = centred or str(p.alignment).startswith("CENTER")
             right_aligned = right_aligned or str(p.alignment).startswith("RIGHT")
@@ -223,6 +258,7 @@ def check_overlap(prs, rep, eps, family):
 
 
 def check_overflow(prs, rep, family):
+    missed = {}
     for i, slide in enumerate(prs.slides):
         n = i + 1
         for shape in visible_shapes(slide):
@@ -233,7 +269,9 @@ def check_overflow(prs, rep, family):
                 continue
             need = ((tf.margin_top or 0) + (tf.margin_bottom or 0)) / EMU
             measured = False
-            for p in tf.paragraphs:
+            fonts = set()
+            paras = tf.paragraphs
+            for k, p in enumerate(paras):
                 if not p.runs or p.runs[0].font.size is None:
                     continue
                 size = p.runs[0].font.size.pt
@@ -242,21 +280,31 @@ def check_overflow(prs, rep, family):
                     continue
                 ls = M.lines(toks, size, M.para_width(shape, p))
                 if ls is None:
+                    fonts |= M.missing_fonts(toks)
                     continue
                 measured = True
-                spacing = p.line_spacing if isinstance(p.line_spacing, float) else 1.2
-                after = p.space_after.pt if p.space_after is not None else 0
-                need += (len(ls) * size * spacing + after) / 72.0
+                need += para_height(p, size, len(ls), k == 0, k == len(paras) - 1) / 72.0
             have = (shape.height or 0) / EMU
+            # With a paragraph left out, need is a floor: it can prove an
+            # overflow, never the absence of one.
             if measured and need > have + 0.06:
                 rep.add("ERROR", "overflow", n,
                         "%s needs %.2f in of height and has %.2f" % (shape.name, need, have))
+            else:
+                for key in fonts:
+                    missed.setdefault(key, set()).add((n, shape.shape_id))
+    warn_unmeasured(rep, "overflow", missed)
 
 
 def check_orphans(prs, rep, family, min_ratio, fill, include_first):
     for n, text, kind in M.report(prs, family, min_ratio, not include_first, fill):
         rep.add("WARN" if kind == "at risk" else "ERROR", "orphans", n,
                 "%s: %s" % (kind, text[:64]))
+    missed = {}
+    for n, shape, _p, toks in M.paragraphs(prs, family, not include_first):
+        for key in M.missing_fonts(toks):
+            missed.setdefault(key, set()).add((n, shape.shape_id))
+    warn_unmeasured(rep, "orphans", missed)
 
 
 def check_type(prs, rep, min_pt):
@@ -401,8 +449,9 @@ def main():
     by_check = Counter(r[1] for r in rep.rows)
     for level in ("ERROR", "WARN"):
         rows = [r for r in rep.rows if r[0] == level]
-        for _l, check, slide, msg in sorted(rows, key=lambda r: (r[1], r[2])):
-            print("%-5s %-9s slide %-3d %s" % (level, check, slide, msg))
+        for _l, check, slide, msg in sorted(rows, key=lambda r: (r[1], r[2] or 0)):
+            where = "deck     " if slide is None else "slide %-3d" % slide
+            print("%-5s %-9s %s %s" % (level, check, where, msg))
     if rep.rows:
         print("")
     print("%d error, %d warning%s" % (len(rep.errors()), len(rep.warnings()),
