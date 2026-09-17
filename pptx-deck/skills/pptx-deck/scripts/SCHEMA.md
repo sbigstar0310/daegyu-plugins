@@ -27,6 +27,7 @@ to use sensible defaults.
   last is a deck nobody timed.
 - `hidden`: bool, keep the slide in the file but out of the slideshow and out of
   the exported PDF. This is how an appendix is handled: hide it, do not cut it.
+  `render_real.py` still renders it, unless `--skip-hidden`.
 
 ## Design tokens (use color NAMES, not hex)
 - colors (this instance only): `ink` (navy text), `blue` (primary accent), `gray` (secondary), `green`/`green_dk` (positive), `red` (negative), `line` (hairline), `white`.
