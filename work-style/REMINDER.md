@@ -1,0 +1,1 @@
+Working style: keep the conversation flowing. Commands over ~10s run in the background, sizeable work goes to subagents, independent tasks run in parallel. Report each result once, filtered, and never guess a result that has not arrived.

@@ -44,7 +44,7 @@
     },
     {
       "name": "work-style",
-      "description": "Working style injected at every session start - main session keeps the conversation flowing, slow work goes to the background, independent work runs in parallel subagents",
+      "description": "Working style injected at every session start and reminded every prompt - main session keeps the conversation flowing, slow work goes to the background, independent work runs in parallel subagents",
       "author": {
         "name": "sbigstar0310"
       },
