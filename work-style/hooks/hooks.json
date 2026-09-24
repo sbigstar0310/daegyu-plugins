@@ -1,5 +1,5 @@
 {
-  "description": "Prints RULES.md into the context whenever a session starts, resumes, clears or compacts, so the working style holds in every project and survives compaction.",
+  "description": "Prints RULES.md into the context whenever a session starts, resumes, clears or compacts, and a one-line REMINDER.md before every prompt, so the working style holds in every project, survives compaction and does not fade in long sessions.",
   "hooks": {
     "SessionStart": [
       {
@@ -7,6 +7,17 @@
           {
             "type": "command",
             "command": "cat \"${CLAUDE_PLUGIN_ROOT}/RULES.md\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat \"${CLAUDE_PLUGIN_ROOT}/REMINDER.md\"",
             "timeout": 5
           }
         ]
