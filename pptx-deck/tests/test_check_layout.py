@@ -26,14 +26,14 @@ def deck():
     return prs
 
 
-def text_box(prs, height, lines, family="Inter", bold=False, name="box"):
+def text_box(prs, height, lines, family="Inter", bold=False, name="box", wrap=True):
     """The issue's repro frame on a new slide: 4 in wide, 0.1 in insets, 12 pt,
-    single spaced, one paragraph per line."""
+    single spaced, one paragraph per line. A "\v" in a line is a line break."""
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     tb = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(height))
     tb.name = name
     tf = tb.text_frame
-    tf.word_wrap = True
+    tf.word_wrap = wrap
     tf.auto_size = MSO_AUTO_SIZE.NONE
     for m in ("margin_left", "margin_right", "margin_top", "margin_bottom"):
         setattr(tf, m, Inches(0.1))
@@ -41,11 +41,14 @@ def text_box(prs, height, lines, family="Inter", bold=False, name="box"):
         p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
         p.line_spacing = 1.0
         p.space_after = Pt(0)
-        r = p.add_run()
-        r.text = text
-        r.font.size = Pt(12)
-        r.font.name = family
-        r.font.bold = bold
+        for k, part in enumerate(text.split("\v")):
+            if k:
+                p.add_line_break()
+            r = p.add_run()
+            r.text = part
+            r.font.size = Pt(12)
+            r.font.name = family
+            r.font.bold = bold
     return tb
 
 
@@ -241,6 +244,144 @@ def test_an_unmeasured_orphan_frame_is_a_warning_and_the_first_slide_is_skipped(
          '2 frames not measured: font "Inter" not found, on slides 2, 3')]
 
 
+def test_a_wrapped_orphan_is_still_reported(fonts):
+    fonts("Inter-hash.ttf", "Inter", "Regular")
+    prs = deck()
+    text_box(prs, 0.40, ["title"])
+    text_box(prs, 0.60, [ORPHANED])
+    assert M.report(prs) == [(2, ORPHANED, "orphan")]
+
+
+def test_an_unset_word_wrap_wraps(fonts):
+    # No wrap attribute in the file means PowerPoint's default, which wraps.
+    fonts("Inter-hash.ttf", "Inter", "Regular")
+    prs = deck()
+    text_box(prs, 0.40, ["title"])
+    text_box(prs, 0.60, [ORPHANED], wrap=None)
+    assert M.report(prs) == [(2, ORPHANED, "orphan")]
+
+
+# ---------------------------------------------------------------- no-wrap frames
+# 44 characters fill 264 pt of the 273.6 pt line, 96 percent. ORPHANED adds " LINK"
+# and is 294 pt, 4.08 in: wrapped, "LINK" drops to a 24 pt last line; unwrapped, it
+# runs 0.28 in past the inner edge, to 1 + 0.1 + 4.08 = 5.18 in.
+FULL = "X" * 44
+ORPHANED = FULL + " LINK"
+
+
+def test_a_nowrap_line_is_never_an_orphan(fonts):
+    fonts("Inter-hash.ttf", "Inter", "Regular")
+    prs = deck()
+    text_box(prs, 0.40, ["title"])
+    text_box(prs, 0.40, [ORPHANED], wrap=False)
+    assert M.report(prs) == []
+
+
+def test_a_nearly_full_nowrap_line_is_not_at_risk(fonts):
+    fonts("Inter-hash.ttf", "Inter", "Regular")
+    prs = deck()
+    text_box(prs, 0.40, ["title"])
+    text_box(prs, 0.40, [FULL], wrap=False)
+    assert M.report(prs) == []
+
+
+def test_fix_leaves_a_nowrap_frame_alone(fonts):
+    fonts("Inter-hash.ttf", "Inter", "Regular")
+    prs = deck()
+    text_box(prs, 0.40, ["title"])
+    tb = text_box(prs, 0.40, [ORPHANED], wrap=False)
+    assert M.fix(prs) == 0
+    assert tb.width == Inches(4)
+    assert tb.text_frame.paragraphs[0].runs[0].font.size == Pt(12)
+
+
+def test_a_nowrap_line_wider_than_its_box_overflows(fonts):
+    fonts("Inter-hash.ttf", "Inter", "Regular")
+    prs = deck()
+    text_box(prs, 0.40, [ORPHANED], wrap=False, name="code")
+    text_box(prs, 0.40, [FULL], wrap=False, name="fits")
+    rep = overflow(prs)
+    assert rep.errors() == [
+        ("ERROR", "overflow", 1, "code needs 4.08 in of width and has 3.80")]
+    assert rep.warnings() == []
+
+
+def test_a_nowrap_frame_is_one_line_per_paragraph(fonts):
+    # 0.2 in of insets and five 0.2 in lines. Wrapped at 0.3 in, each short
+    # paragraph would still be one line, so this is not the wrap model's count.
+    fonts("Inter-hash.ttf", "Inter", "Regular")
+    prs = deck()
+    text_box(prs, 0.35, ["PERFORM %d000-STEP" % k for k in range(1, 6)], wrap=False,
+             name="tall")
+    assert [r[3] for r in overflow(prs).errors()] == [
+        "tall needs 1.20 in of height and has 0.35"]
+
+
+def test_an_unmeasured_nowrap_frame_is_a_warning(fonts):
+    prs = deck()
+    text_box(prs, 0.40, [ORPHANED], wrap=False)
+    rep = overflow(prs)
+    assert rep.errors() == []
+    assert [r[3] for r in rep.warnings()] == [
+        '1 frame not measured: font "Inter" not found, on slide 1']
+
+
+def test_the_ink_of_a_nowrap_line_is_not_cut_at_the_frame(fonts):
+    fonts("Inter-hash.ttf", "Inter", "Regular")
+    prs = deck()
+    tb = text_box(prs, 0.40, [ORPHANED], wrap=False, name="code")
+    nb = prs.slides[0].shapes.add_shape(1, Inches(5.1), Inches(1), Inches(1), Inches(0.4))
+    nb.name = "Neighbour"
+    nb.fill.solid()
+    l, t, r, b = C.ink_box(tb, "Inter")
+    assert (l, r) == (pytest.approx(1.1), pytest.approx(1.1 + 294 / 72.0))
+    rep = C.Report()
+    C.check_overlap(prs, rep, C.EPS, "Inter")
+    assert [r[3] for r in rep.errors()] == ["code and Neighbour overlap by 0.08 x 0.20 in"]
+
+
+# ---------------------------------------------------------------- line breaks
+def test_a_line_break_is_kept_as_a_break():
+    prs = deck()
+    tb = text_box(prs, 0.40, ["AAA\vBBB"])
+    toks = M.tokens(tb.text_frame.paragraphs[0], "Inter")
+    assert [w for w, _b, _f in toks] == ["AAA", M.BREAK, "BBB"]
+
+
+def test_a_line_break_starts_a_line_in_a_wrapped_frame(fonts):
+    # Glued into one word, "AAABBB" is one 0.2 in line and 0.40 in fits.
+    fonts("Inter-hash.ttf", "Inter", "Regular")
+    prs = deck()
+    text_box(prs, 0.45, ["AAA\vBBB"], name="broken")
+    assert [r[3] for r in overflow(prs).errors()] == [
+        "broken needs 0.60 in of height and has 0.45"]
+
+
+def test_a_line_break_starts_a_line_in_a_nowrap_frame(fonts):
+    fonts("Inter-hash.ttf", "Inter", "Regular")
+    prs = deck()
+    text_box(prs, 0.45, ["AAA\vBBB"], wrap=False, name="broken")
+    assert [r[3] for r in overflow(prs).errors()] == [
+        "broken needs 0.60 in of height and has 0.45"]
+
+
+def test_a_short_line_after_a_break_is_not_an_orphan(fonts):
+    # The break put "end" there on purpose. Wrapping did not.
+    fonts("Inter-hash.ttf", "Inter", "Regular")
+    prs = deck()
+    text_box(prs, 0.40, ["title"])
+    text_box(prs, 0.80, ["X" * 30 + "\vend"])
+    assert M.report(prs) == []
+
+
+def test_an_orphan_before_a_break_is_still_one(fonts):
+    fonts("Inter-hash.ttf", "Inter", "Regular")
+    prs = deck()
+    text_box(prs, 0.40, ["title"])
+    text_box(prs, 0.80, [ORPHANED + "\vend"])
+    assert [r[2] for r in M.report(prs)] == ["orphan"]
+
+
 # ---------------------------------------------------------------- the command
 @pytest.fixture
 def run_main(tmp_path, monkeypatch, capsys):
@@ -310,3 +451,67 @@ def test_the_issue_repro_fails_the_command(fonts, run_main):
     code, out = run_main(prs)
     assert code == 1
     assert "ERROR overflow  slide 1   TenLines_h1.90 needs 2.20 in" in out
+
+
+# ---------------------------------------------------------------- real LibreOffice
+def real_font(family):
+    """The machine's own file for a family, looked up with the real font path."""
+    M._file_cache.clear()
+    M._name_table = None
+    return M.font_file(family, False)
+
+
+@pytest.mark.libreoffice
+def test_a_nowrap_frame_renders_as_measured(tmp_path):
+    """One unwrapped code line in a 4 in box, and a frame of three paragraphs
+    with a line break in the middle one. LibreOffice must draw the code line on
+    one line at the measured width, past the frame, and the other frame on the
+    four lines the model counts."""
+    import subprocess
+
+    import pymupdf
+    import render_real as R
+
+    soffice = R.find_soffice()
+    if soffice is None:
+        pytest.skip("LibreOffice is not installed")
+    if real_font("Inter") is None:
+        pytest.skip("Inter is not installed, so LibreOffice would draw another font")
+
+    code = "EXEC CICS LINK PROGRAM('LGICUS01') COMMAREA(CA) RESP(WS-RESP)"
+    prs = deck()
+    one = text_box(prs, 0.40, [code], wrap=False, name="code")
+    text_box(prs, 1.00, ["MOVE A TO B", "PERFORM 1000-STEP\vTHRU 1000-EXIT", "GOBACK"],
+             wrap=False, name="tall")
+    path = tmp_path / "nowrap.pptx"
+    prs.save(str(path))
+    subprocess.run([soffice, "--headless", "--convert-to", "pdf", "--outdir",
+                    str(tmp_path), str(path)], capture_output=True, check=True)
+    doc = pymupdf.open(str(tmp_path / "nowrap.pdf"))
+
+    def drawn(page):
+        """[(text, bbox)] for each line of text on a page, top to bottom."""
+        return sorted(((("".join(s["text"] for s in ln["spans"])).strip(), ln["bbox"])
+                       for blk in page.get_text("dict")["blocks"]
+                       for ln in blk.get("lines", [])
+                       if "".join(s["text"] for s in ln["spans"]).strip()),
+                      key=lambda row: row[1][1])
+
+    # A LibreOffice that substitutes another face would make the widths below
+    # compare two different fonts.
+    used = [f[3] for f in doc[0].get_fonts()]
+    assert any("Inter" in name for name in used), "LibreOffice drew %s" % used
+
+    code_lines = drawn(doc[0])
+    assert [t for t, _b in code_lines] == [code]
+    p = one.text_frame.paragraphs[0]
+    measured = max(M.lines(M.tokens(p, "Inter"), 12, M.para_width(one, p), wrap=False))
+    x0, _y0, x1, _y1 = code_lines[0][1]
+    assert x1 - x0 == pytest.approx(measured, rel=0.03)
+    assert x1 / 72.0 > 5.0                      # past the frame's right edge
+
+    assert [t for t, _b in drawn(doc[1])] == [
+        "MOVE A TO B", "PERFORM 1000-STEP", "THRU 1000-EXIT", "GOBACK"]
+    # 0.2 in of insets and four 0.2 in lines fill the 1.00 in frame exactly.
+    assert [r[3] for r in overflow(prs).errors()] == [
+        "code needs %.2f in of width and has 3.80" % (measured / 72.0)]

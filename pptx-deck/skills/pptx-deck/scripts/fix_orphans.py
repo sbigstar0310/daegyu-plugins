@@ -146,8 +146,8 @@ def font_file(family, bold):
 def missing_fonts(toks):
     """{(family, bold)} a paragraph needs and has no file for. lines() returns None
     for such a paragraph, and a caller that skips it must say so."""
-    return {(family, bool(bold)) for _w, bold, family in toks
-            if font_file(family, bold) is None}
+    return {(family, bool(bold)) for w, bold, family in toks
+            if w != BREAK and font_file(family, bold) is None}
 
 
 def font(family, bold, size_pt):
@@ -163,46 +163,88 @@ def run_family(run, default):
     return run.font.name or default
 
 
+# A line break inside a paragraph (<a:br/>, Shift+Enter). tokens() puts it in the
+# word list, and lines() always ends the line there.
+BREAK = "\v"
+
+
+def wraps(shape):
+    """False only for a frame that says wrap="none". A frame that says nothing
+    takes PowerPoint's default, which wraps."""
+    return shape.text_frame.word_wrap is not False
+
+
 def tokens(p, default_family):
-    """[(word, bold, family)] for one paragraph. A word takes the weight and family
-    of the run it starts in, which is right for the bold lead-in pattern."""
+    """[(word, bold, family)] for one paragraph, with (BREAK, bold, family) where
+    it has a line break. A word takes the weight and family of the run it starts
+    in, which is right for the bold lead-in pattern."""
     full = ""
     spans = []
-    for r in p.runs:
-        spans.append((len(full), len(full) + len(r.text), bool(r.font.bold),
-                      run_family(r, default_family)))
-        full += r.text
+    runs = iter(p.runs)
+    last = (False, default_family)
+    for child in p._p:
+        tag = child.tag.rsplit("}", 1)[-1]
+        if tag == "r":
+            r = next(runs)
+            last = (bool(r.font.bold), run_family(r, default_family))
+            text = r.text
+        elif tag == "br":
+            text = BREAK
+        else:
+            continue
+        spans.append((len(full), len(full) + len(text)) + last)
+        full += text
     out = []
-    for m in re.finditer(r"\S+", full):
+    # BREAK is whitespace to \S, so it is matched on its own.
+    for m in re.finditer(r"\v|\S+", full):
         hit = next((s for s in spans if s[0] <= m.start() < s[1]), None)
         out.append((m.group(), hit[2] if hit else False,
                     hit[3] if hit else default_family))
     return out
 
 
-def lines(toks, size_pt, width_pt):
-    """Greedy word wrap. Returns the width in points of each resulting line, or
-    None if the font file is missing, in which case nothing can be measured."""
+def text_of(toks):
+    return " ".join(w for w, _b, _f in toks if w != BREAK)
+
+
+def segment_lines(toks, size_pt, width_pt, wrap=True):
+    """[[line widths in points]] for each stretch between line breaks: a greedy
+    word wrap, or with wrap=False one line per stretch whatever its width. None if
+    a font file is missing, in which case nothing can be measured."""
     out = []
     cur = 0.0
     n = 0
+    seg = []
     for word, bold, family in toks:
+        if word == BREAK:
+            seg.append(cur)
+            out.append(seg)
+            cur, n, seg = 0.0, 0, []
+            continue
         f = font(family, bold, size_pt)
         if f is None:
             return None
         ww = f.getlength(word) / SCALE
         sp = f.getlength(" ") / SCALE
         cand = cur + (sp if n else 0.0) + ww
-        if cand <= width_pt or n == 0:
+        if not wrap or cand <= width_pt or n == 0:
             cur = cand
             n += 1
         else:
-            out.append(cur)
+            seg.append(cur)
             cur = ww
             n = 1
-    if n:
-        out.append(cur)
+    seg.append(cur)
+    out.append(seg)
     return out
+
+
+def lines(toks, size_pt, width_pt, wrap=True):
+    """The width in points of each line the paragraph is drawn on, or None if a
+    font file is missing. A line break always starts a line; wrap=False is a frame
+    that never wraps, so only a break does."""
+    segs = segment_lines(toks, size_pt, width_pt, wrap)
+    return None if segs is None else [w for seg in segs for w in seg]
 
 
 def para_width(shape, p):
@@ -218,16 +260,18 @@ def para_width(shape, p):
 def orphan(toks, size_pt, width_pt, min_ratio):
     """(is_orphan, line_count_at_nominal_width). Checked at the nominal width and
     at plus and minus 3 percent, so a paragraph that only breaks in PowerPoint is
-    still caught."""
+    still caught. A short line that a line break ends was put there on purpose, so
+    only the last line of each stretch that wraps counts, and the count leaves out
+    the lines the breaks add."""
     bad = False
     n_at = 0
     for k in (1.0, 0.97, 1.03):
-        ls = lines(toks, size_pt, width_pt * k)
-        if ls is None:
+        segs = segment_lines(toks, size_pt, width_pt * k)
+        if segs is None:
             return False, 0
         if k == 1.0:
-            n_at = len(ls)
-        if len(ls) >= 2 and ls[-1] < min_ratio * width_pt:
+            n_at = sum(len(seg) for seg in segs) - (len(segs) - 1)
+        if any(len(seg) >= 2 and seg[-1] < min_ratio * width_pt for seg in segs):
             bad = True
     return bad, n_at
 
@@ -251,6 +295,9 @@ def paragraphs(prs, default_family, skip_first):
         for shape in slide.shapes:
             if not shape.has_text_frame or shape.shape_type == 19:  # 19 = table
                 continue
+            # A frame that never wraps cannot leave a short last line.
+            if not wraps(shape):
+                continue
             for p in shape.text_frame.paragraphs:
                 if not p.runs or p.runs[0].font.size is None:
                     continue
@@ -269,7 +316,7 @@ def report(prs, default_family="Inter", min_ratio=0.34, skip_first=True,
         size = p.runs[0].font.size.pt
         pw = para_width(shape, p)
         bad, count = orphan(toks, size, pw, min_ratio)
-        text = " ".join(w for w, _b, _f in toks)
+        text = text_of(toks)
         if bad:
             out.append((n, text, "orphan" if count >= 2 else "at risk"))
         elif count == 1 and fill_ratio(toks, size, pw) > at_risk_fill:
@@ -286,6 +333,9 @@ def fix(prs, default_family="Inter", min_ratio=0.34, min_scale=0.84,
             continue
         for shape in slide.shapes:
             if not shape.has_text_frame or shape.shape_type == 19:
+                continue
+            # Narrowing a frame that never wraps only pushes more of it outside.
+            if not wraps(shape):
                 continue
             tf = shape.text_frame
 

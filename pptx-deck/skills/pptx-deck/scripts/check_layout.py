@@ -11,7 +11,8 @@ Six checks, all of them arithmetic on real coordinates and real font metrics:
 
   bounds     a shape that leaves the canvas, or crosses the content margins
   overlap    two shapes whose boxes intersect by more than a hairline
-  overflow   text that needs more height than its box has
+  overflow   text that needs more height than its box has, or more width in a
+             frame that never wraps
   orphans    a last line holding one or two words, or one wrap away from it
   type       a run below the readable floor, and the type scale actually in use
   gaps       a horizontal band of dead space taller than the budget
@@ -132,6 +133,7 @@ def ink_box(shape, family):
     pad_t = (tf.margin_top or 0) / EMU
     pad_b = (tf.margin_bottom or 0) / EMU
     inner_w = (r - l) - pad_l - pad_r
+    wrap = M.wraps(shape)
     widest = 0.0
     height = 0.0
     centred = False
@@ -144,7 +146,7 @@ def ink_box(shape, family):
         toks = M.tokens(p, family)
         if not toks:
             continue
-        ls = M.lines(toks, size, M.para_width(shape, p))
+        ls = M.lines(toks, size, M.para_width(shape, p), wrap)
         if ls is None:
             return l, t, r, b
         widest = max(widest, max(ls) / 72.0)
@@ -154,7 +156,10 @@ def ink_box(shape, family):
             right_aligned = right_aligned or str(p.alignment).startswith("RIGHT")
     if widest <= 0:
         return l, t, r, b
-    widest = min(widest, inner_w)
+    # A frame that never wraps draws a long line past its edge, and that is
+    # where it collides with whatever sits beside it.
+    if wrap:
+        widest = min(widest, inner_w)
     height = min(height, (b - t) - pad_t - pad_b) if (b - t) > pad_t + pad_b else height
     if centred:
         x0 = l + pad_l + (inner_w - widest) / 2.0
@@ -265,9 +270,11 @@ def check_overflow(prs, rep, family):
             if not shape.has_text_frame or shape.shape_type == TABLE:
                 continue
             tf = shape.text_frame
-            if tf.word_wrap is False:
-                continue
+            wrap = M.wraps(shape)
+            inset = ((tf.margin_left or 0) + (tf.margin_right or 0)) / EMU
+            inner_w = (shape.width or 0) / EMU - inset
             need = ((tf.margin_top or 0) + (tf.margin_bottom or 0)) / EMU
+            need_w = 0.0
             measured = False
             fonts = set()
             paras = tf.paragraphs
@@ -278,19 +285,27 @@ def check_overflow(prs, rep, family):
                 toks = M.tokens(p, family)
                 if not toks:
                     continue
-                ls = M.lines(toks, size, M.para_width(shape, p))
+                pw = M.para_width(shape, p)
+                ls = M.lines(toks, size, pw, wrap)
                 if ls is None:
                     fonts |= M.missing_fonts(toks)
                     continue
                 measured = True
                 need += para_height(p, size, len(ls), k == 0, k == len(paras) - 1) / 72.0
+                # The paragraph's own left margin comes out of the width too.
+                need_w = max(need_w, (max(ls) / 72.0) + (inner_w - pw / 72.0))
             have = (shape.height or 0) / EMU
             # With a paragraph left out, need is a floor: it can prove an
             # overflow, never the absence of one.
-            if measured and need > have + 0.06:
+            wide = measured and not wrap and need_w > inner_w + EPS
+            tall = measured and need > have + 0.06
+            if wide:
+                rep.add("ERROR", "overflow", n,
+                        "%s needs %.2f in of width and has %.2f" % (shape.name, need_w, inner_w))
+            if tall:
                 rep.add("ERROR", "overflow", n,
                         "%s needs %.2f in of height and has %.2f" % (shape.name, need, have))
-            else:
+            if not (wide or tall):
                 for key in fonts:
                     missed.setdefault(key, set()).add((n, shape.shape_id))
     warn_unmeasured(rep, "overflow", missed)
