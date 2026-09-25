@@ -15,6 +15,7 @@ capability is unavailable and the deck is still buildable without it.
 import argparse
 import importlib.util
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -45,6 +46,21 @@ PY_MODULES = [
     ("pymupdf", "pymupdf", True, "turn the rendered PDF into PNG you can look at"),
 ]
 
+# The image plugin takes any one of these, each from its provider's key page.
+# OpenRouter is the gateway to all of them.
+IMAGE_KEYS = {
+    "OPENROUTER_API_KEY": "https://openrouter.ai/keys  (credits: https://openrouter.ai/settings/credits)",
+    "GEMINI_API_KEY": "https://aistudio.google.com/apikey",
+    "OPENAI_API_KEY": "https://platform.openai.com/api-keys",
+    "XAI_API_KEY": "https://console.x.ai",
+    "GROK_API_KEY": "https://console.x.ai",
+}
+# Where the key lives by default. A project's .env holds the project's own keys,
+# and an image key there bills the wrong account.
+USER_KEY_FILE = "~/.config/pptx-deck/image.env"
+# Describes the key it is called with, and costs nothing.
+OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
+
 SKILL_PLUGINS = [
     ("claude-image-generation", "hex-plugins", "hex/claude-marketplace",
      "generate the diagrams and illustrations a slide needs when the paper has none"),
@@ -70,6 +86,64 @@ def plugin_installed(name):
         if os.path.isdir(os.path.join(root, market, name)):
             return True
     return False
+
+
+def jq_cmd():
+    """The image plugin's scripts need jq. Without sudo, the static binary goes into
+    ~/.local/bin, which needs no root."""
+    if BREW:
+        return "brew install jq"
+    local = ("mkdir -p ~/.local/bin && curl -fsSL -o ~/.local/bin/jq "
+             "https://github.com/jqlang/jq/releases/latest/download/jq-%s-%s "
+             "&& chmod +x ~/.local/bin/jq   (~/.local/bin must be on PATH)"
+             % ("macos" if sys.platform == "darwin" else "linux",
+                "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "amd64"))
+    if APT and shutil.which("sudo"):
+        return "sudo apt-get install -y jq\n    or, without sudo: " + local
+    return local
+
+
+def image_keys(files=(USER_KEY_FILE, ".env")):
+    """{name: (value, source)} for the IMAGE_KEYS set in the environment, then in
+    each file in order. Print the names and sources only: this output lands in a
+    transcript."""
+    found = {k: (os.environ[k], "the environment") for k in IMAGE_KEYS if os.environ.get(k)}
+    for path in files:
+        if not os.path.isfile(os.path.expanduser(path)):
+            continue
+        with open(os.path.expanduser(path)) as f:
+            for line in f:
+                name, eq, value = line.strip().partition("=")
+                name = name.replace("export ", "").strip()
+                value = value.strip().strip("\"'")
+                if eq and name in IMAGE_KEYS and value and name not in found:
+                    found[name] = (value, path)
+    return found
+
+
+def check_key(name, value):
+    """("valid" | "invalid" | "unchecked", detail). Only an OpenRouter key can be
+    asked about itself for free. A key the server could not be asked about is
+    unchecked, not invalid."""
+    if name != "OPENROUTER_API_KEY":
+        return "unchecked", ""
+    import json
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(OPENROUTER_KEY_URL, headers={"Authorization": "Bearer " + value})
+    try:
+        urllib.request.urlopen(req, timeout=10).close()
+        return "valid", ""
+    except urllib.error.HTTPError as e:
+        if e.code not in (401, 403):
+            return "unchecked", "HTTP %d" % e.code
+        try:
+            msg = json.loads(e.read().decode("utf-8"))["error"]["message"]
+        except (ValueError, KeyError, TypeError):
+            msg = e.reason
+        return "invalid", ("HTTP %d: %s" % (e.code, msg)).replace(value, "***")
+    except (urllib.error.URLError, OSError) as e:
+        return "unchecked", str(getattr(e, "reason", e))
 
 
 def deck_fonts(path):
@@ -107,6 +181,11 @@ def main():
     soffice = find_soffice()
     rows.append((soffice is not None, True, "libreoffice", "render the deck the way a projector will, which is the only way to see real line breaks",
                  app_cmd("brew install --cask libreoffice", "sudo apt-get install -y libreoffice")))
+    if soffice:
+        from uno_pdf import find_python
+        rows.append((find_python(soffice) is not None, False, "libreoffice uno",
+                     "turn off the gaps LibreOffice alone puts between Hangul and Latin text",
+                     app_cmd("brew reinstall --cask libreoffice", "sudo apt-get install -y python3-uno")))
 
     fonts = list(a.font)
     if a.deck and importlib.util.find_spec("pptx"):
@@ -130,7 +209,31 @@ def main():
 
     for name, market, repo, why in SKILL_PLUGINS:
         rows.append((plugin_installed(name), False, "plugin %s" % name, why,
-                     "/plugin marketplace add %s   then   /plugin install %s@%s" % (repo, name, market)))
+                     "claude plugin marketplace add %s   then   claude plugin install %s@%s"
+                     % (repo, name, market)))
+
+    rows.append((shutil.which("jq") is not None, False, "jq",
+                 "run the image plugin, whose scripts read every API answer with jq",
+                 jq_cmd()))
+
+    # Missing and present-but-invalid are separate rows, and neither prints a value.
+    keys = image_keys()
+    if not keys:
+        rows.append((False, False, "image key",
+                     "generate art: the image plugin bills one of these keys",
+                     "make one and put it in %s as NAME=..., mode 600, not in\n"
+                     "    the project's .env. Never paste it into the chat. Paid, priced per model.\n"
+                     % USER_KEY_FILE
+                     + "\n".join("        %-19s %s" % (k, url) for k, url in IMAGE_KEYS.items()
+                                 if k != "GROK_API_KEY")))
+    for name, (value, source) in keys.items():
+        state, detail = check_key(name, value)
+        rows.append((state != "invalid", False,
+                     "image key %s%s, from %s" % (name, {"valid": "", "unchecked": " (unchecked)",
+                                                          "invalid": " invalid"}[state], source),
+                     "generate art on it. OpenRouter answered %s" % detail,
+                     "make a new one at %s,\n    replace it in %s, and never paste it into the chat"
+                     % (IMAGE_KEYS[name], source)))
 
     missing_required = [r for r in rows if not r[0] and r[1]]
     missing_optional = [r for r in rows if not r[0] and not r[1]]
@@ -152,7 +255,7 @@ def main():
         return 1
     if missing_optional:
         print("Everything required is here. %d optional capabilit%s unavailable: offer "
-              "the install, do not run it." % (len(missing_optional),
+              "the install, and run it only on a yes." % (len(missing_optional),
                                                "y is" if len(missing_optional) == 1 else "ies are"))
         return 0
     print("Everything is here.")
