@@ -37,9 +37,6 @@ claude plugin install mobile-qa@daegyu-plugins
 
 Update later with `/plugin marketplace update daegyu-plugins`.
 
-> Marketplace names cannot start with `claude-` — Claude Code rejects them as
-> impersonating an official Anthropic marketplace.
-
 ## Repository layout
 
 Each plugin is a top-level directory containing its own
