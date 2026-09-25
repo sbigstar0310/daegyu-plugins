@@ -39,10 +39,12 @@ the tokens set SCALE_SKIP_ABOVE (text that ends above this y) or SCALE_SKIP_SLID
 
 portable runs with --portable, or by itself when the tokens set a TARGET other than
 pdf or libreoffice. It flags the portable subset of SKILL.md section 2 on each
-shape: autofit, line spacing in points, Hangul in a run whose fonts disagree or
-lack it, a highlight across fonts, a filled shape over some lines of a text frame
+shape: autofit, line spacing in points, Hangul in a run with no font that carries
+it, a highlight across fonts, a filled shape over some lines of a text frame
 (allow: exempts it), a line over PORTABLE_FILL of its frame, and for TARGET =
-"google-slides" a family missing from assets/index/google-fonts.txt.
+"google-slides" a family missing from assets/index/google-fonts.txt, a weight or
+style word after its name allowed. An ea font from google-fonts-korean.txt carries
+Hangul: Google Slides draws such a run correctly.
 
 --lang-check is off by default. It looks for the characters that make a deck read
 as machine written: the em dash and the middle dot used as a separator.
@@ -84,8 +86,11 @@ CJK_FONTS = ("Noto Sans KR", "Noto Serif KR", "Noto Sans CJK KR", "Source Han Sa
 # What Google Slides draws besides the Google Fonts families. Anything else is Arial.
 SLIDES_WEB_FONTS = ("Arial", "Comic Sans MS", "Courier New", "Georgia", "Impact",
                     "Times New Roman", "Trebuchet MS", "Verdana")
-GOOGLE_FONTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            "assets", "index", "google-fonts.txt")
+INDEX = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                     "assets", "index")
+# "Inter SemiBold" is Inter to Google Slides.
+STYLE_WORDS = re.compile(r"(\s+(thin|extra\s*light|light|regular|medium|semi\s*bold|"
+                         r"extra\s*bold|bold|black|italic))+$", re.I)
 
 
 class Report(object):
@@ -496,13 +501,17 @@ def highlighted(r):
     return rPr is not None and rPr.find(qn("a:highlight")) is not None
 
 
+def index_names(name):
+    with open(os.path.join(INDEX, name), encoding="utf-8") as f:
+        return {M._flat(line) for line in f if line.strip()}
+
+
 def check_portable(prs, rep, family, target=None, cjk_fonts=()):
-    cjk = {M._flat(f) for f in CJK_FONTS + tuple(cjk_fonts)}
+    korean = index_names("google-fonts-korean.txt")
+    cjk = {M._flat(f) for f in CJK_FONTS + tuple(cjk_fonts)} | korean
     google = None
     if target == "google-slides":
-        with open(GOOGLE_FONTS, encoding="utf-8") as f:
-            google = {M._flat(line) for line in f if line.strip()}
-        google |= {M._flat(f) for f in SLIDES_WEB_FONTS}
+        google = index_names("google-fonts.txt") | {M._flat(f) for f in SLIDES_WEB_FONTS}
     for i, slide in enumerate(prs.slides):
         n = i + 1
         said = set()
@@ -529,16 +538,18 @@ def check_portable(prs, rep, family, target=None, cjk_fonts=()):
                     warn("%s: line spacing in points, which Google Slides cannot store" % name)
                 for r in p.runs:
                     latin, ea = run_fonts(r)
-                    if HANGUL.search(r.text):
-                        if latin and ea and M._flat(latin) != M._flat(ea):
-                            warn("%s: Hangul in a run whose latin %s and ea %s differ"
-                                 % (name, latin, ea))
-                        elif M._flat(latin or family) not in cjk:
+                    if HANGUL.search(r.text) and M._flat(latin or family) not in cjk \
+                            and not (ea and M._flat(ea) in korean):
+                        if ea:
+                            warn("%s: Hangul in a run whose latin %s lacks it and whose ea %s "
+                                 "is not a Google font that has it" % (name, latin or family, ea))
+                        else:
                             warn("%s: Hangul in %s, not a font known to carry it"
                                  % (name, latin or family))
                     if google is not None:
                         for face in (latin, ea):
-                            if face and not face.startswith("+") and M._flat(face) not in google:
+                            if face and not face.startswith("+") and M._flat(face) not in google \
+                                    and M._flat(STYLE_WORDS.sub("", face)) not in google:
                                 warn("%s: %s is not a Google Fonts family, so Slides draws "
                                      "it in Arial" % (name, face))
                 for lit, runs in itertools.groupby(p.runs, highlighted):

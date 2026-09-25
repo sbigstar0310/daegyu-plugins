@@ -225,7 +225,8 @@ these choices keep that disagreement small:
 - `noAutofit`, with sizes you measured. LibreOffice refits any autofit its own way.
 - Line spacing as a percentage (`spcPct`), never in points (`spcPts`), which
   Slides cannot store.
-- One font per run, with `latin` and `ea` the same where one font covers both.
+- Hangul in a font that carries it: the `latin` font, or an `ea` font from Google
+  Fonts such as Noto Sans KR.
 - A highlight in one font, never split across frames.
 - No shape placed over text by an assumed line pitch.
 - Google Fonts only for a Google Slides talk. Slides draws any other font in Arial.
