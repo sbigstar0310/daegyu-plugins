@@ -246,7 +246,14 @@ REAL = S.find_soffice()
 @pytest.mark.libreoffice
 @pytest.mark.skipif(REAL is None, reason="LibreOffice is not installed")
 def test_a_real_render_through_the_variable(tmp_path, nowhere, monkeypatch, capsys):
-    # PATH, the fixed paths and the globs are empty: only the variable can find it.
+    # The fixed paths and the globs are empty, and PATH holds only the system
+    # directories: on Linux soffice is a shell script that needs dirname, sed and grep.
+    # None of them may hold soffice, so only the variable can find it.
+    system = [d for d in os.defpath.split(os.pathsep) if d]
+    if any(os.path.exists(os.path.join(d, name)) for d in system
+           for name in ("soffice", "libreoffice")):
+        pytest.skip("a system soffice would be found through PATH")
+    monkeypatch.setenv("PATH", os.pathsep.join([str(nowhere["bin"])] + system))
     monkeypatch.setenv("PPTX_DECK_SOFFICE", REAL)
     prs = Presentation()
     tb = prs.slides.add_slide(prs.slide_layouts[6]).shapes.add_textbox(
