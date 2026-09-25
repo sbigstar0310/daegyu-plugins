@@ -72,16 +72,94 @@ default because nobody answered is how a whole draft gets thrown away.
 
 ### 0.3 Preflight: check what this deck will need
 
-Run `python3 scripts/preflight.py` and ask for the missing pieces once, in a single
-message. Do not ask for things this deck will not use.
+Run `python3 scripts/preflight.py` at the start of every deck, one that continues a
+line included, and ask for the missing pieces once, in a single message, before
+gate 1. Do not ask for things this deck will not use.
+
+**Never skip image generation in silence.** Every slide needs a picture (section
+5), so if `claude-image-generation` is missing, handle it in that message. The user
+types no commands; you install it.
+
+1. Say what it adds: line art for slots no icon or source figure fits. Say it is
+   paid, priced per model, and needs an API key: `OPENROUTER_API_KEY` is the
+   gateway, and `GEMINI_API_KEY`, `OPENAI_API_KEY` and `XAI_API_KEY` also work.
+2. Say whether a key is already set and whether it is valid. Preflight looks in
+   the environment, then `~/.config/pptx-deck/image.env`, then the project's
+   `.env`, says where it found the key, reports a missing key and one that is
+   present but invalid separately, and never prints a value. If it is missing or
+   invalid, you cannot make one, so make the next step effortless:
+   - Give the key page as a link: OpenRouter <https://openrouter.ai/keys> (credits:
+     <https://openrouter.ai/settings/credits>), Gemini
+     <https://aistudio.google.com/apikey>, OpenAI
+     <https://platform.openai.com/api-keys>, xAI <https://console.x.ai>.
+   - Say where it goes: `~/.config/pptx-deck/image.env`, one line
+     `OPENROUTER_API_KEY=...` (or another provider's variable), mode 600. Not the
+     project's `.env`: it holds the project's own keys, and mixing them bills the
+     wrong account. Create the file with `umask 077` if they ask. Tell them never
+     to paste the key into the chat.
+   - When they say it is done, re-run preflight and one cheap generation.
+   - If they already have an OpenRouter provisioning key, you may create a key
+     through OpenRouter's API, on approval.
+3. Ask for approval to install it, and to use and bill that key.
+4. On a yes, install `jq` if preflight says it is missing (the plugin's scripts
+   need it), run these, then test one cheap generation before promising art on
+   any slide.
+
+```
+claude plugin marketplace add hex/claude-marketplace
+claude plugin install claude-image-generation@hex-plugins
+```
+
+Load the key only for an image-generation command, inside that one command:
+`set -a; . ~/.config/pptx-deck/image.env; set +a; <command>`. Never write it into
+the project.
 
 | Need | Missing means |
 |---|---|
 | LibreOffice | No real renders. `brew install --cask libreoffice`. The bundled previewer uses a proxy font and cannot tell you where a line breaks |
 | The deck's font, visible to LibreOffice | Silent substitution, so every line break you check is fiction |
-| `claude-image-generation` plugin | No generated art. `/plugin marketplace add hex/claude-marketplace`, then `/plugin install claude-image-generation` |
-| An image key | Same. Test one cheap generation before promising art on any slide |
+| `claude-image-generation` plugin | No generated art. You install it on a yes, as above |
+| `jq` | The image plugin's scripts fail. Preflight gives an install that needs no sudo |
+| LibreOffice's `uno` | Renders keep the gaps LibreOffice alone puts between Hangul and Latin text. The libreoffice.org build bundles it; Debian needs `python3-uno` |
+| An image key | Same. Preflight says which key is set and where, and asks OpenRouter whether its key is valid |
 | BasicTeX | No typeset formulas. `brew install --cask basictex`. Only if the deck needs maths |
+
+**Ask where the deck will be presented, and which verification the user wants**,
+in the same message: PowerPoint, Google Slides, Keynote or a PDF. Be honest about
+what each tier costs and what it leaves open.
+
+- **Default, no setup.** `render_real.py` through LibreOffice's `uno` with
+  autospace off, the portable subset (section 2), and `check_layout.py --portable`
+  clean. Tell the user plainly that your renders are LibreOffice's, and what can
+  still differ in their app: where a nearly full line breaks, fonts missing on the
+  presenting machine, and how the app maps a few properties. Ask them to open the
+  gate 2 samples in it before the full build. For a PDF talk the default is
+  already exact.
+- **Exact, opt-in.** Render with the target app itself, and present the file you
+  checked. The tooling is planned, not built.
+
+| Target | Exact render | One-time effort |
+|---|---|---|
+| Google Slides | Upload through Drive converted to Slides, then export that to PDF | The user's own Desktop OAuth client, since rclone's shared one is retired in 2026: the Drive API only, the `drive.file` scope, and the app published, since a testing one expires its tokens after seven days. rclone keeps the token in `~/.config/rclone/rclone.conf`, mode 600 |
+| PowerPoint | PowerPoint for the web, through Microsoft Graph's `?format=pdf` | An app registration in Microsoft Entra, which a personal account can also make, with delegated `Files.Read` for the conversion (`Files.ReadWrite` to upload the deck), and a device-code or browser login. Unverified: the latency, and the size limit (the advice is under 4 MB; conversions have timed out above 100 slides) |
+| Keynote | None known | Ask for one pass in Keynote |
+
+The Google Slides render, planned through rclone, is per build:
+
+```
+rclone copyto deck.pptx gdrive:pptx-deck/deck.pptx --drive-import-formats pptx
+rclone copyto gdrive:pptx-deck/deck.pdf out/deck.pdf --drive-export-formats pdf
+```
+
+then split the PDF into slide images locally, and delete the Drive file or keep it
+as the one to present.
+
+<!-- TODO: build the exact renders: Google Slides through rclone as above, PowerPoint through Graph -->
+
+Record both answers in `tokens.py`, as `TARGET` (`"google-slides"`, `"powerpoint"`,
+`"keynote"`, `"pdf"` or `"libreoffice"`) and `VERIFY` (`"default"` or `"exact"`),
+so a later session does not ask again. The pptx preview in Cursor or VS Code draws
+with its own renderer: it is not evidence.
 
 ---
 
@@ -279,9 +357,9 @@ alpha: at a placed size of 0.2 to 0.3 in, anything lower goes soft through the p
 to PDF to PNG round trip. Cap a logo row at about five, and only logos the
 presenter can talk about.
 
-**Generated line art** when no icon or source figure fits. Use the image plugin,
-one generation per call, two or three candidates per slot. Keep a fixed preamble
-and coda so the set looks like one set:
+**Generated line art** is the first choice for a figure when no icon or source
+figure fits. Use the image plugin, one generation per call, two or three
+candidates per slot. Keep a fixed preamble and coda so the set looks like one set:
 
 > Minimal black line-art illustration on a pure white background. Thin, uniform
 > black strokes only. No text, no letters, no labels, no numbers, no colour, no
@@ -294,7 +372,8 @@ Vary only the subject. Keep originals and always trim from them, so trimming is
 idempotent, then re-measure: the aspect ratio changed.
 
 **Native shapes** for diagrams the user may want to edit, and for anything that
-must stay crisp at projector zoom.
+must stay crisp at projector zoom. Generated art cannot guarantee text, so a figure
+that must show exact labels, numbers or code is native shapes or HTML.
 
 ---
 
