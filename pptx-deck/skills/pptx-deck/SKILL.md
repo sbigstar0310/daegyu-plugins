@@ -163,9 +163,12 @@ looked at in its target.
 ## 3. Verify on a real render, never on a proxy
 
 ```
-python3 scripts/render_real.py deck.pptx --out render/     # LibreOffice, then PNG
+python3 scripts/render_real.py deck.pptx --out render/ --contact-sheet   # PNGs and render/contact.png
 python3 scripts/check_layout.py deck.pptx --tokens tokens.py
 ```
+
+`render_real.py` exports through LibreOffice's `uno` when it can, with the Hangul
+and Latin gaps that only LibreOffice adds turned off, and says which route ran.
 
 `scripts/render_preview_faithful.py` is for triage while you are still typing
 coordinates, and for studying a reference. It draws real pptx coordinates, so trust
@@ -176,9 +179,9 @@ line breaks, and it ignores vertical anchor.
 make about a layout comes from a real render of the real file. You will be asked,
 twice, whether you actually looked.
 
-**Look at two zoom levels.** A 120 dpi contact sheet for the deck, and a 200 dpi
-single-slide PNG for every slide you touched this round. The contact sheet is where
-caption overlaps hide.
+**Look at two zoom levels.** A 120 dpi contact sheet for the deck, which
+`--contact-sheet` writes, and a 200 dpi single-slide PNG for every slide you
+touched this round. The contact sheet is where caption overlaps hide.
 
 **Then check the geometry in code, because your eyes miss 0.05 in.**
 `check_layout.py` reports:
@@ -474,8 +477,9 @@ geometry fixes yourself.
 The deck is one of several artifacts. Ask which the talk needs, and keep them in
 sync on every build.
 
-- `deck.pptx` and `deck.pdf`, in the project folder beside the reference. Make the
-  PDF with `render_real.py --skip-hidden --keep-pdf`, so the appendix stays out.
+- `deck.pptx` and `deck.pdf`, in the project folder beside the reference. Write the
+  PDF with `render_real.py --pdf-out <folder>/deck.pdf`: the file you checked,
+  hidden slides included.
 - `render/`, the contact sheet plus a 200 dpi PNG per slide.
 - **Speaker notes inside the pptx**, one block per slide, written as you build.
 - **A rehearsal script derived from the notes**, never from the content doc, which
@@ -490,8 +494,8 @@ sync on every build.
 **Appendix slides are hidden, not deleted.** Call it Appendix, never Backup. Hide
 with `slide._element.set("show", "0")`: excluded from the slideshow and from the
 exported PDF, still reachable by typing the slide number. `render_real.py` renders
-them anyway, so the appendix is checked like any other slide. For the handout PDF,
-pass `--skip-hidden --keep-pdf`.
+them anyway, so the appendix is checked like any other slide. For a handout PDF
+without them, pass `--skip-hidden --pdf-out`.
 
 ---
 
@@ -505,7 +509,7 @@ pass `--skip-hidden --keep-pdf`.
 - `assets/tokens_white.py` and `assets/starter_build.py`, the default instance.
 - `assets/icons/`, `assets/logos/`, `assets/index/`, bundled art and search indexes.
 - `scripts/preflight.py`, `extract_ref.py`, `deck_lib.py`, `render_real.py`,
-  `check_layout.py`, `fix_orphans.py`, `paper_assets.py`, `icons.py`.
+  `uno_pdf.py`, `check_layout.py`, `fix_orphans.py`, `paper_assets.py`, `icons.py`.
 - `scripts/example_deck_grammar.py`, a worked deck in the house grammar.
 - `scripts/render.py`, `preview.py`, `render_candidate.py`, `SCHEMA.md`, the spec
   renderer for house-line decks.

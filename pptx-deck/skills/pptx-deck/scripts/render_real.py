@@ -5,7 +5,9 @@
     python3 scripts/render_real.py deck.pptx                 # -> render/s01.png ...
     python3 scripts/render_real.py deck.pptx --dpi 200 -o build/render
     python3 scripts/render_real.py deck.pptx --slides 8,13   # re-render two pages
-    python3 scripts/render_real.py deck.pptx --skip-hidden --keep-pdf   # the handout
+    python3 scripts/render_real.py deck.pptx --contact-sheet # and render/contact.png
+    python3 scripts/render_real.py deck.pptx --pdf-out docs/deck.pdf   # the deliverable
+    python3 scripts/render_real.py deck.pptx --skip-hidden --pdf-out handout.pdf
 
 This is the only render you are allowed to judge line breaks from. The matplotlib
 previewer uses a proxy font and approximates wrapping, so it can tell you where a
@@ -15,6 +17,11 @@ Hidden slides are rendered too. A render made for checking shows everything the
 file holds, so the appendix gets its layout checked like every other slide, and
 page N is slide N. The hidden ones are listed. --skip-hidden renders what the
 slideshow shows instead, which is what a handout PDF wants.
+
+--pdf-out keeps the PDF this run rendered from, hidden slides included unless
+--skip-hidden, so the file you deliver is the file you checked. --contact-sheet
+tiles every slide it wrote into contact.png, at SHEET_DPI whatever --dpi says,
+each labelled with its slide number.
 
 Three traps it handles for you.
 
@@ -30,6 +37,10 @@ resolved against the font directories first, and a missing one is a hard error,
 because every line break in the output would be fiction. A missing Bold whose
 Regular is there is only a warning: LibreOffice strokes the Regular glyphs, which
 keeps their widths, so the render is still true to this machine.
+
+LibreOffice alone widens every gap between Hangul and Latin text. When a python
+that can import uno is found, the export goes through uno_pdf.py, which turns that
+off; otherwise it is the plain command line export. The route that ran is printed.
 """
 import argparse
 import glob
@@ -41,10 +52,17 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fix_orphans import font_file  # noqa: E402
+from uno_pdf import find_python as find_uno_python  # noqa: E402
+
+UNO_PDF = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uno_pdf.py")
 
 # LibreOffice leaves hidden slides out of a PDF unless told otherwise. JSON filter
 # options on the command line need LibreOffice 7.4 or newer.
 PDF_WITH_HIDDEN = 'pdf:impress_pdf_Export:{"ExportHiddenSlides":{"type":"boolean","value":"true"}}'
+
+SHEET_DPI = 120    # the whole deck in one look, as SKILL.md reviews it
+SHEET_COLUMNS = 4
+SHEET_PAD = 16     # pixels between tiles, and under each for its label
 
 SOFFICE = [
     "/Applications/LibreOffice.app/Contents/MacOS/soffice",
@@ -95,6 +113,36 @@ def slide_map(prs, skip_hidden):
     return out
 
 
+def contact_sheet(doc, pages, hidden):
+    """pages is [(slide_number, page_number)]. One image, SHEET_COLUMNS across,
+    each slide on a grey ground so a white slide keeps its edge."""
+    from PIL import Image, ImageDraw, ImageFont
+    tiles = []
+    for slide_no, page_no in pages:
+        pix = doc[page_no - 1].get_pixmap(dpi=SHEET_DPI)
+        tiles.append((slide_no, Image.frombytes("RGB", (pix.width, pix.height), pix.samples)))
+    w = max(im.width for _n, im in tiles)
+    h = max(im.height for _n, im in tiles)
+    label = 2 * SHEET_PAD
+    cols = min(SHEET_COLUMNS, len(tiles))
+    rows = (len(tiles) + cols - 1) // cols
+    sheet = Image.new("RGB", (cols * (w + SHEET_PAD) + SHEET_PAD,
+                              rows * (h + label + SHEET_PAD) + SHEET_PAD), "#DDDDDD")
+    draw = ImageDraw.Draw(sheet)
+    try:
+        font = ImageFont.load_default(size=label - 8)
+    except TypeError:  # Pillow before 10.1 has only a small bitmap font
+        font = ImageFont.load_default()
+    for i, (slide_no, im) in enumerate(tiles):
+        r, c = divmod(i, cols)
+        x = SHEET_PAD + c * (w + SHEET_PAD)
+        y = SHEET_PAD + r * (h + label + SHEET_PAD)
+        sheet.paste(im, (x, y))
+        draw.text((x, y + h + 4), "%d%s" % (slide_no, "  hidden" if slide_no in hidden else ""),
+                  fill="black", font=font)
+    return sheet
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("deck")
@@ -102,6 +150,9 @@ def main():
     ap.add_argument("--dpi", type=int, default=120, help="120 to review layout, 200 to read text")
     ap.add_argument("--slides", help="only write these slide numbers, comma separated")
     ap.add_argument("--keep-pdf", action="store_true")
+    ap.add_argument("--pdf-out", help="also write the checked PDF to this path")
+    ap.add_argument("--contact-sheet", action="store_true",
+                    help="also tile every slide written into contact.png at %d dpi" % SHEET_DPI)
     ap.add_argument("--skip-hidden", action="store_true",
                     help="leave hidden slides out, as the slideshow does. For a handout PDF.")
     ap.add_argument("--allow-missing-font", action="store_true",
@@ -147,7 +198,7 @@ def main():
     out = os.path.abspath(a.out)
     os.makedirs(out, exist_ok=True)
     # Not `rm -f DIR/*.png`: zsh aborts the whole command on an unmatched glob.
-    for old in glob.glob(os.path.join(out, "s*.png")):
+    for old in glob.glob(os.path.join(out, "s*.png")) + glob.glob(os.path.join(out, "contact.png")):
         os.remove(old)
 
     deck = os.path.abspath(a.deck)
@@ -160,9 +211,23 @@ def main():
     # would be rendered as if it were this deck.
     if os.path.exists(pdf):
         os.remove(pdf)
-    target = "pdf" if a.skip_hidden else PDF_WITH_HIDDEN
-    r = subprocess.run([soffice, "--headless", "--convert-to", target, "--outdir", out, deck],
-                       capture_output=True, text=True)
+    route = "command line, autospace on"
+    uno_python = find_uno_python(soffice)
+    if uno_python:
+        cmd = [uno_python, UNO_PDF, soffice, deck, pdf] + ([] if a.skip_hidden else ["--hidden"])
+        try:
+            err = subprocess.run(cmd, capture_output=True, text=True, timeout=300).stderr
+        except subprocess.TimeoutExpired:
+            err = "timed out after 300 s"
+        if os.path.exists(pdf):
+            route = "uno, autospace off"
+        else:
+            sys.stderr.write("WARNING: the uno export wrote no PDF (%s), so the command line "
+                             "export runs.\n" % (err.strip().splitlines() or ["no message"])[-1])
+    if not os.path.exists(pdf):
+        target = "pdf" if a.skip_hidden else PDF_WITH_HIDDEN
+        r = subprocess.run([soffice, "--headless", "--convert-to", target, "--outdir", out, deck],
+                           capture_output=True, text=True)
     if not os.path.exists(pdf):
         sys.stderr.write("LibreOffice produced no PDF.\n%s\n%s\n" % (r.stdout, r.stderr))
         sys.stderr.write("If PowerPoint has the deck open, a ~$ lock file is in the way.\n")
@@ -189,20 +254,31 @@ def main():
     if a.slides:
         want = {int(x) for x in a.slides.replace(" ", "").split(",") if x}
 
-    written = 0
+    written = []
     for slide_no, page_no in smap:
         if page_no is None or page_no > doc.page_count or (want and slide_no not in want):
             continue
         path = os.path.join(out, "s%02d.png" % slide_no)
         doc[page_no - 1].get_pixmap(dpi=a.dpi).save(path)
-        written += 1
+        written.append((slide_no, page_no))
+    if a.contact_sheet and written:
+        contact_sheet(doc, written, hidden).save(os.path.join(out, "contact.png"))
     page_count = doc.page_count
     doc.close()
-    if not a.keep_pdf:
+    dest = os.path.abspath(a.pdf_out) if a.pdf_out else None
+    if dest and dest != pdf:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.copyfile(pdf, dest)
+    if not a.keep_pdf and dest != pdf:
         os.remove(pdf)
 
+    print("export  %s" % route)
     print("slides  %d, visible %d, hidden %d" % (len(smap), len(smap) - len(hidden), len(hidden)))
-    print("pages   %d at %d dpi, wrote %d PNG into %s" % (page_count, a.dpi, written, out))
+    print("pages   %d at %d dpi, wrote %d PNG into %s" % (page_count, a.dpi, len(written), out))
+    if a.contact_sheet and written:
+        print("sheet   contact.png, %d slides at %d dpi" % (len(written), SHEET_DPI))
+    if dest:
+        print("pdf     %s" % dest)
     if not hidden:
         print("no hidden slides, so page N is slide N")
     elif not skipped:
