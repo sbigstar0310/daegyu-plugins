@@ -27,6 +27,18 @@ name a tool, not to imply endorsement.
 
 Both are snapshots. `python3 scripts/icons.py refresh-index` pulls current ones.
 
+- `google-fonts.txt`: all 1,946 Google Fonts family names, one per line, taken
+  2026-09-25. `check_layout.py --portable` reads it for a Google Slides target
+  and never fetches it. Refresh it with:
+
+      curl -s https://fonts.google.com/metadata/fonts | python3 -c 'import json, sys; t = sys.stdin.read(); print("\n".join(sorted({f["family"] for f in json.loads(t[t.index("{"):])["familyMetadataList"]})))' > assets/index/google-fonts.txt
+
+- `google-fonts-korean.txt`: the 38 of those with a Korean subset, taken the same
+  day. `--portable` counts Hangul as covered when a run's `ea` font is one of
+  them. Refresh it with:
+
+      curl -s https://fonts.google.com/metadata/fonts | python3 -c 'import json, sys; t = sys.stdin.read(); print("\n".join(sorted({f["family"] for f in json.loads(t[t.index("{"):])["familyMetadataList"] if "korean" in f["subsets"]})))' > assets/index/google-fonts-korean.txt
+
 ## tokens_white.py and starter_build.py
 
 The default instance: a white deck at 10 x 5.625 in with Inter, described in
