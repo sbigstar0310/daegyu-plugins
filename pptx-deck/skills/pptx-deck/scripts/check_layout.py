@@ -6,8 +6,9 @@
     python3 scripts/check_layout.py deck.pptx --margins 0.67,9.33,5.30
     python3 scripts/check_layout.py deck.pptx --tokens assets/tokens_white.py
     python3 scripts/check_layout.py deck.pptx --lang-check --strict
+    python3 scripts/check_layout.py deck.pptx --lang-check --max-words 25
 
-Six checks, all of them arithmetic on real coordinates and real font metrics:
+Seven checks, all but the last arithmetic on real coordinates and real font metrics:
 
   bounds     a shape that leaves the canvas, or crosses the content margins
   overlap    two shapes whose boxes intersect by more than a hairline
@@ -16,6 +17,8 @@ Six checks, all of them arithmetic on real coordinates and real font metrics:
   orphans    a last line holding one or two words, or one wrap away from it
   type       a run below the readable floor, and the type scale actually in use
   gaps       a horizontal band of dead space taller than the budget
+  language   the em dash and the middle dot, which make a deck read as machine
+             written, in the slide text and in the notes
 
 Overlap has two exemptions, and you should use them rather than turning the check
 off. One shape fully inside another is deliberate: a label on a card, a caption on
@@ -28,11 +31,14 @@ overflow and orphans measure with the deck's font file. A frame whose font has n
 file on this machine is not measured, and is not passed either: each missing font
 gets a WARN that counts the frames it left out, so --strict fails on it.
 
---lang-check is off by default. It looks for the characters that make a deck read
-as machine written: the em dash and the middle dot used as a separator.
+--lang-check adds the prose check, for a presenter speaking a second language: the
+longest sentence on each slide, and in its notes, if it has more than --max-words
+words (20 by default). Each paragraph, and so each bullet, ends a sentence, and so
+do . ! and ?. Words are counted on spaces, so Korean is counted by its spaced units.
 """
 import argparse
 import os
+import re
 import sys
 from collections import Counter
 
@@ -43,6 +49,7 @@ EMU = 914400.0
 EPS = 0.02          # inches. Two boxes closer than this are touching, not overlapping.
 GAP_BUDGET = 1.20   # inches of dead vertical space before a slide looks unfinished.
 MIN_PT = 8.0        # nothing below this is readable from the back of a room.
+MAX_WORDS = 20      # a longer sentence is hard to say in a second language.
 # A single-spaced line is 1.2 x the font size in PowerPoint and in LibreOffice,
 # and a proportional line spacing multiplies that, not the bare size. LibreOffice
 # draws 12 pt at 1.0 on a 14.40 pt pitch and 7.5 pt at 1.15 on 10.35.
@@ -402,20 +409,53 @@ def check_gaps(prs, rep, ml, mr, cb, budget):
                     % (worst, at, budget))
 
 
+def language_texts(slide):
+    """[(paragraph text, in_notes)] for one slide: every paragraph of every text
+    frame, then the notes."""
+    out = []
+    for shape in slide.shapes:
+        if shape.has_text_frame:
+            out.extend((p.text, False) for p in shape.text_frame.paragraphs)
+    if slide.has_notes_slide:
+        out.extend((p.text, True)
+                   for p in slide.notes_slide.notes_text_frame.paragraphs)
+    return out
+
+
 def check_language(prs, rep):
     for i, slide in enumerate(prs.slides):
         n = i + 1
-        texts = []
-        for shape in slide.shapes:
-            if shape.has_text_frame:
-                texts.append(shape.text_frame.text)
-        if slide.has_notes_slide:
-            texts.append(slide.notes_slide.notes_text_frame.text)
-        for t in texts:
+        for t, in_notes in language_texts(slide):
             for ch, what in BANNED.items():
                 if ch in t:
-                    where = t[max(0, t.index(ch) - 28):t.index(ch) + 28].replace("\n", " ")
-                    rep.add("WARN", "language", n, "%s in: %s" % (what, where))
+                    where = t[max(0, t.index(ch) - 28):t.index(ch) + 28].replace("\v", " ")
+                    rep.add("WARN", "language", n, "%s in%s: %s"
+                            % (what, " the notes" if in_notes else "", where))
+
+
+# A sentence ends at . ! or ? before a space, and at a paragraph or a line break.
+SENTENCE_END = re.compile(r"(?<=[.!?])\s+|\v")
+
+
+def longest_sentence(texts):
+    """(word_count, sentence) for the longest sentence in these paragraphs."""
+    best = (0, "")
+    for t in texts:
+        for s in SENTENCE_END.split(t):
+            best = max(best, (len(s.split()), s.strip()), key=lambda b: b[0])
+    return best
+
+
+def check_sentences(prs, rep, max_words):
+    for i, slide in enumerate(prs.slides):
+        n = i + 1
+        texts = language_texts(slide)
+        for in_notes in (False, True):
+            count, sentence = longest_sentence(t for t, notes in texts if notes == in_notes)
+            if count > max_words:
+                start = sentence if len(sentence) <= 48 else sentence[:48] + "..."
+                rep.add("WARN", "language", n, "longest sentence%s is %d words (limit %d): %s"
+                        % (" in the notes" if in_notes else "", count, max_words, start))
 
 
 # ---------------------------------------------------------------- driver
@@ -432,7 +472,9 @@ def main():
     ap.add_argument("--fill-risk", type=float, default=M.AT_RISK_FILL)
     ap.add_argument("--include-first", action="store_true")
     ap.add_argument("--lang-check", action="store_true",
-                    help="also flag em dashes and middle dots. Off by default.")
+                    help="also report the longest sentence on each slide and in its notes")
+    ap.add_argument("--max-words", type=int, default=MAX_WORDS,
+                    help="the longest sentence --lang-check lets pass")
     ap.add_argument("--only", help="run only these checks, comma separated")
     ap.add_argument("--strict", action="store_true", help="warnings fail too")
     a = ap.parse_args()
@@ -468,8 +510,10 @@ def main():
     sizes = check_type(prs, rep, a.min_pt) if run("type") else Counter()
     if run("gaps"):
         check_gaps(prs, rep, ml, mr, cb, a.gap_budget)
-    if a.lang_check and run("language"):
+    if run("language"):
         check_language(prs, rep)
+        if a.lang_check:
+            check_sentences(prs, rep, a.max_words)
 
     print("deck     %s, %d slides, canvas %.2f x %.2f in"
           % (os.path.basename(a.deck), len(prs.slides),
