@@ -27,7 +27,9 @@ run is deleted before this one starts, and the deck's own mtime is printed.
 
 LibreOffice substitutes a missing font in silence. Every family the deck names is
 resolved against the font directories first, and a missing one is a hard error,
-because every line break in the output would be fiction.
+because every line break in the output would be fiction. A missing Bold whose
+Regular is there is only a warning: LibreOffice strokes the Regular glyphs, which
+keeps their widths, so the render is still true to this machine.
 """
 import argparse
 import glob
@@ -58,7 +60,7 @@ def find_soffice():
 
 
 def families(prs):
-    """Every font family named by a run in the deck, most used first."""
+    """Every (family, bold) named by a run in the deck, most used first."""
     from collections import Counter
     c = Counter()
     for slide in prs.slides:
@@ -68,7 +70,7 @@ def families(prs):
             for p in shape.text_frame.paragraphs:
                 for r in p.runs:
                     if r.font.name:
-                        c[r.font.name] += len(r.text)
+                        c[(r.font.name, bool(r.font.bold))] += len(r.text)
     return [f for f, _n in c.most_common()]
 
 
@@ -118,7 +120,19 @@ def main():
             "    sudo apt-get install -y libreoffice    # Debian or Ubuntu\n")
         return 2
 
-    missing = [f for f in families(prs) if font_file(f, False) is None]
+    used = families(prs)
+    missing = []
+    for f, _bold in used:
+        if f not in missing and font_file(f, False) is None:
+            missing.append(f)
+    # A bold with no Bold file but a Regular is drawn by stroking the Regular, which
+    # keeps its widths: the render is real, a machine with the Bold may differ.
+    for f, bold in used:
+        if bold and f not in missing and font_file(f, True) is None:
+            sys.stderr.write(
+                'WARNING: "%s" has no Bold file, so LibreOffice will synthesise the bold\n'
+                "from the Regular. Its line breaks are real here; on a machine with the\n"
+                "real Bold a proportional family can set up to ~7%% wider.\n" % f)
     if missing:
         msg = ("the deck asks for %s and no file for it was found.\n"
                "LibreOffice will substitute another font without saying so, and every\n"

@@ -80,8 +80,10 @@ def render(tmp_path, monkeypatch, capsys):
                                           "--dpi", "72"] + list(flags))
         code = R.main()
         io = capsys.readouterr()
+        # A run stopped before it starts, as the font gate does, makes no directory.
+        names = sorted(os.listdir(str(out))) if out.exists() else []
         pngs = {name: Image.open(str(out / name)).size[0]
-                for name in sorted(os.listdir(str(out))) if name.endswith(".png")}
+                for name in names if name.endswith(".png")}
         return code, io.out, io.err, pngs
 
     return run
@@ -178,6 +180,52 @@ def test_a_deck_without_hidden_slides(tmp_path, libreoffice, render):
     assert code == 0
     assert len(pngs) == 5
     assert "no hidden slides, so page N is slide N" in out
+
+
+# ---------------------------------------------------------------- the font gate
+def font_deck(path, runs):
+    """One slide with one run per (family, bold)."""
+    prs = Presentation()
+    tf = prs.slides.add_slide(prs.slide_layouts[6]).shapes.add_textbox(
+        Inches(1), Inches(1), Inches(6), Inches(1)).text_frame
+    for family, bold in runs:
+        r = tf.paragraphs[0].add_run()
+        r.text, r.font.name, r.font.bold = "%s %s " % (family, bold), family, bold
+    prs.save(str(path))
+    return str(path)
+
+
+def test_families_keeps_the_weight(tmp_path):
+    prs = Presentation(font_deck(tmp_path / "d.pptx",
+                                 [("Mono", True), ("Mono", False), ("Sans", True)]))
+    assert sorted(R.families(prs)) == [("Mono", False), ("Mono", True), ("Sans", True)]
+
+
+def test_a_missing_bold_warns_and_renders(tmp_path, fonts, libreoffice, render):
+    fonts("Mono-hash.ttf", "Mono", "Regular")
+    libreoffice()
+    code, _out, err, pngs = render(font_deck(tmp_path / "d.pptx", [("Mono", True), ("Mono", False)]))
+    assert code == 0
+    assert pngs == {"s01.png": slide_width(1)}
+    assert 'WARNING: "Mono" has no Bold file' in err
+    assert "LibreOffice will synthesise the bold" in err
+
+
+def test_a_missing_regular_still_stops_the_render(tmp_path, fonts, libreoffice, render):
+    fonts("Mono-hash.ttf", "Mono", "Bold")
+    libreoffice()
+    code, _out, err, pngs = render(font_deck(tmp_path / "d.pptx", [("Mono", False)]))
+    assert code == 2
+    assert "the deck asks for Mono and no file for it was found" in err
+    assert pngs == {}
+
+
+def test_a_bold_only_family_with_no_file_at_all_stops_the_render(tmp_path, fonts, libreoffice,
+                                                                render):
+    libreoffice()
+    code, _out, err, _pngs = render(font_deck(tmp_path / "d.pptx", [("Mono", True)]))
+    assert code == 2
+    assert "the deck asks for Mono and no file" in err
 
 
 # ---------------------------------------------------------------- real LibreOffice

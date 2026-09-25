@@ -23,6 +23,12 @@ locally first: a key may already sit in the environment or in a provider file.
 `/Applications/LibreOffice.app/Contents/Resources/fonts/truetype` before the first
 render, or every line break you check is fiction.
 
+**A bold with no Bold file is drawn by stroking the Regular.** The widths stay the
+Regular's, so `check_layout.py` and `fix_orphans.py` measure that bold with the
+Regular file. For a fixed-pitch family that is exact everywhere. For a proportional
+one it matches this render only, and they say so with a WARN, because a machine
+with the real Bold sets it up to about 7 percent wider. Install the Bold to clear it.
+
 **Hidden slides shift the page index.** `render_real.py` renders hidden slides, so
 there page N is slide N. Any export that leaves them out, `--skip-hidden`, PowerPoint
 or a plain `soffice --convert-to pdf`, has fewer pages than slides, so page N is not
