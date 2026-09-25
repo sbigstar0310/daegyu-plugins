@@ -736,9 +736,12 @@ def test_the_test_frame_is_portable():
                  "box: line spacing in points, which Google Slides cannot store", id="spcPts"),
     pytest.param(hangul("Inter"), "box: Hangul in Inter, not a font known to carry it",
                  id="hangul in a latin font"),
-    pytest.param(hangul("Noto Sans KR", "Malgun Gothic"),
-                 "box: Hangul in a run whose latin Noto Sans KR and ea Malgun Gothic differ",
-                 id="hangul with two fonts"),
+    # Google Slides drew latin Inter with ea Noto Sans KR correctly.
+    pytest.param(hangul("Inter", "Noto Sans KR"), None, id="hangul in a Google ea font"),
+    pytest.param(hangul("Inter", "Malgun Gothic"),
+                 "box: Hangul in a run whose latin Inter lacks it and whose ea Malgun Gothic "
+                 "is not a Google font that has it", id="hangul in a non-Google ea font"),
+    pytest.param(hangul("Noto Sans KR", "Malgun Gothic"), None, id="the latin font carries it"),
     pytest.param(hangul("Noto Sans KR", "Noto Sans KR"), None, id="hangul in one CJK font"),
     pytest.param(lambda tb: two_runs(tb, "Mono"),
                  "box: one highlight spans runs in different fonts", id="highlight across fonts"),
@@ -770,8 +773,13 @@ def test_a_filled_shape_over_some_lines_is_flagged(fonts, top, height, name, fla
 
 @pytest.mark.parametrize("family, flagged", [
     pytest.param("Inter", False, id="a Google font"),
+    # Google Slides drew "Inter SemiBold" titles as Inter, not Arial.
+    pytest.param("Inter SemiBold", False, id="a Google font and its weight"),
+    pytest.param("Inter Extra Bold Italic", False, id="a Google font, weight and style"),
+    pytest.param("Archivo Black", False, id="a Google font whose name ends in a weight"),
     pytest.param("Arial", False, id="a web font Slides has"),
     pytest.param("Calibri", True, id="drawn in Arial"),
+    pytest.param("Calibri Light", True, id="a weight does not make it Google"),
 ])
 def test_google_slides_wants_google_fonts(family, flagged):
     prs = deck()
