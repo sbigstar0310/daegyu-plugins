@@ -6,8 +6,9 @@
     python3 scripts/check_layout.py deck.pptx --margins 0.67,9.33,5.30
     python3 scripts/check_layout.py deck.pptx --tokens assets/tokens_white.py
     python3 scripts/check_layout.py deck.pptx --lang-check --strict
+    python3 scripts/check_layout.py deck.pptx --portable
 
-Six checks, all of them arithmetic on real coordinates and real font metrics:
+Eight checks, all of them arithmetic on real coordinates and real font metrics:
 
   bounds     a shape that leaves the canvas, or crosses the content margins
   overlap    two shapes whose boxes intersect by more than a hairline
@@ -15,7 +16,10 @@ Six checks, all of them arithmetic on real coordinates and real font metrics:
              frame that never wraps
   orphans    a last line holding one or two words, or one wrap away from it
   type       a run below the readable floor, and the type scale actually in use
+  scale      a run whose size is not a step of the tokens' TYPE_SCALE, and a
+             TYPE_SCALE of fewer than MIN_LEVELS levels
   gaps       a horizontal band of dead space taller than the budget
+  portable   what PowerPoint, Google Slides and LibreOffice render differently
 
 Overlap has two exemptions, and you should use them rather than turning the check
 off. One shape fully inside another is deliberate: a label on a card, a caption on
@@ -28,21 +32,38 @@ overflow and orphans measure with the deck's font file. A frame whose font has n
 file on this machine is not measured, and is not passed either: each missing font
 gets a WARN that counts the frames it left out, so --strict fails on it.
 
+scale runs only when --tokens defines TYPE_SCALE: a dict of role to pt, or to a
+tuple that starts with the pt, or a list of pts. A size within SCALE_TOL of a step
+is on it. The title band and the section slides are checked like the rest unless
+the tokens set SCALE_SKIP_ABOVE (text that ends above this y) or SCALE_SKIP_SLIDES.
+
+portable runs with --portable, or by itself when the tokens set a TARGET other than
+pdf or libreoffice. It flags the portable subset of SKILL.md section 2 on each
+shape: autofit, line spacing in points, Hangul in a run whose fonts disagree or
+lack it, a highlight across fonts, a filled shape over some lines of a text frame
+(allow: exempts it), a line over PORTABLE_FILL of its frame, and for TARGET =
+"google-slides" a family missing from assets/index/google-fonts.txt.
+
 --lang-check is off by default. It looks for the characters that make a deck read
 as machine written: the em dash and the middle dot used as a separator.
 """
 import argparse
+import itertools
 import os
+import re
 import sys
 from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fix_orphans as M  # noqa: E402
+from pptx.oxml.ns import qn  # noqa: E402
 
 EMU = 914400.0
 EPS = 0.02          # inches. Two boxes closer than this are touching, not overlapping.
 GAP_BUDGET = 1.20   # inches of dead vertical space before a slide looks unfinished.
 MIN_PT = 8.0        # nothing below this is readable from the back of a room.
+SCALE_TOL = 0.25    # points. A size this close to a step of the type scale is that step.
+MIN_LEVELS = 4      # a declared scale with fewer levels cannot keep emphasis apart from body.
 # A single-spaced line is 1.2 x the font size in PowerPoint and in LibreOffice,
 # and a proportional line spacing multiplies that, not the bare size. LibreOffice
 # draws 12 pt at 1.0 on a 14.40 pt pitch and 7.5 pt at 1.15 on 10.35.
@@ -52,6 +73,19 @@ LINE_EM = 1.2
 BANNED = {"—": "em dash", "·": "middle dot separator"}
 
 TABLE = 19  # MSO_SHAPE_TYPE.TABLE
+
+PORTABLE_FILL = M.AT_RISK_FILL   # a line this full wraps in an app whose metrics differ
+HANGUL = re.compile(u"[\u1100-\u11ff\u3130-\u318f\uac00-\ud7a3]")
+# Families known to carry Hangul. Tokens add their own with CJK_FONTS.
+CJK_FONTS = ("Noto Sans KR", "Noto Serif KR", "Noto Sans CJK KR", "Source Han Sans K",
+             "Pretendard", "Spoqa Han Sans Neo", "Nanum Gothic", "Nanum Myeongjo",
+             "Nanum Barun Gothic", "IBM Plex Sans KR", "Gothic A1", "Malgun Gothic",
+             "Apple SD Gothic Neo")
+# What Google Slides draws besides the Google Fonts families. Anything else is Arial.
+SLIDES_WEB_FONTS = ("Arial", "Comic Sans MS", "Courier New", "Georgia", "Impact",
+                    "Times New Roman", "Trebuchet MS", "Verdana")
+GOOGLE_FONTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "assets", "index", "google-fonts.txt")
 
 
 class Report(object):
@@ -343,12 +377,9 @@ def check_orphans(prs, rep, family, min_ratio, fill, include_first):
     warn_synthesised(rep, "orphans", synthesised)
 
 
-def check_type(prs, rep, min_pt):
-    sizes = Counter()
-    small = Counter()
-    example = {}
+def sized_runs(prs):
+    """(slide, shape, pt, run) for every run that sets a size and prints something."""
     for i, slide in enumerate(prs.slides):
-        n = i + 1
         for shape in visible_shapes(slide):
             if not shape.has_text_frame:
                 continue
@@ -356,16 +387,56 @@ def check_type(prs, rep, min_pt):
                 for r in p.runs:
                     if r.font.size is None or not r.text.strip():
                         continue
-                    pt = round(r.font.size.pt, 2)
-                    sizes[pt] += len(r.text)
-                    if pt < min_pt:
-                        small[(n, pt)] += 1
-                        example.setdefault((n, pt), r.text.strip()[:36])
+                    yield i + 1, shape, round(r.font.size.pt, 2), r
+
+
+def check_type(prs, rep, min_pt):
+    sizes = Counter()
+    small = Counter()
+    example = {}
+    for n, _shape, pt, r in sized_runs(prs):
+        sizes[pt] += len(r.text)
+        if pt < min_pt:
+            small[(n, pt)] += 1
+            example.setdefault((n, pt), r.text.strip()[:36])
     for (n, pt), count in sorted(small.items()):
         rep.add("WARN", "type", n,
                 "%d run%s at %.1f pt, below the floor of %.1f, such as %r"
                 % (count, "" if count == 1 else "s", pt, min_pt, example[(n, pt)]))
     return sizes
+
+
+def scale_steps(scale):
+    """The pts of a TYPE_SCALE, whichever of its shapes the tokens use."""
+    steps = scale.values() if isinstance(scale, dict) else scale
+    return sorted({float(v[0] if isinstance(v, (tuple, list)) else v) for v in steps},
+                  reverse=True)
+
+
+def check_scale(prs, rep, scale, skip_slides=(), skip_above=None):
+    """Checks against the scale the deck declared, not a fixed one. Returns the
+    distinct sizes on each slide it checked."""
+    steps = scale_steps(scale)
+    levels = len(scale) if isinstance(scale, dict) else len(steps)
+    if levels < MIN_LEVELS:
+        rep.add("WARN", "scale", None,
+                "TYPE_SCALE declares %d level%s, and a scale the audience can tell apart needs %d"
+                % (levels, "" if levels == 1 else "s", MIN_LEVELS))
+    used = {}
+    off = Counter()
+    example = {}
+    for n, shape, pt, r in sized_runs(prs):
+        if n in skip_slides or (skip_above is not None and box(shape)[3] <= skip_above):
+            continue
+        used.setdefault(n, set()).add(pt)
+        if all(abs(pt - s) > SCALE_TOL for s in steps):
+            off[(n, pt)] += 1
+            example.setdefault((n, pt), r.text.strip()[:36])
+    for (n, pt), count in sorted(off.items()):
+        rep.add("WARN", "scale", n,
+                "%d run%s at %.1f pt, not a step of the type scale, such as %r"
+                % (count, "" if count == 1 else "s", pt, example[(n, pt)]))
+    return used
 
 
 def check_gaps(prs, rep, ml, mr, cb, budget):
@@ -402,6 +473,103 @@ def check_gaps(prs, rep, ml, mr, cb, budget):
                     % (worst, at, budget))
 
 
+def is_filled(shape):
+    """A fill of its own, or one the theme style lends it."""
+    try:
+        if shape.fill.type is not None:
+            return shape.fill.type != 5              # MSO_FILL.BACKGROUND
+    except (AttributeError, NotImplementedError, ValueError):   # pictures, groups
+        return False
+    ref = shape._element.find("%s/%s" % (qn("p:style"), qn("a:fillRef")))
+    return ref is not None and ref.get("idx", "0") != "0"
+
+
+def run_fonts(r):
+    """(latin, ea) typefaces the run names, None where it inherits."""
+    rPr = r._r.rPr
+    ea = rPr.find(qn("a:ea")) if rPr is not None else None
+    return r.font.name, ea.get("typeface") if ea is not None else None
+
+
+def highlighted(r):
+    rPr = r._r.rPr
+    return rPr is not None and rPr.find(qn("a:highlight")) is not None
+
+
+def check_portable(prs, rep, family, target=None, cjk_fonts=()):
+    cjk = {M._flat(f) for f in CJK_FONTS + tuple(cjk_fonts)}
+    google = None
+    if target == "google-slides":
+        with open(GOOGLE_FONTS, encoding="utf-8") as f:
+            google = {M._flat(line) for line in f if line.strip()}
+        google |= {M._flat(f) for f in SLIDES_WEB_FONTS}
+    for i, slide in enumerate(prs.slides):
+        n = i + 1
+        said = set()
+
+        def warn(msg):
+            if msg not in said:
+                said.add(msg)
+                rep.add("WARN", "portable", n, msg)
+
+        texts = []
+        for shape in visible_shapes(slide):
+            if not shape.has_text_frame or shape.shape_type == TABLE \
+                    or not shape.text_frame.text.strip():
+                continue
+            texts.append(shape)
+            name = shape.name
+            for fit in ("a:normAutofit", "a:spAutoFit"):
+                if shape.text_frame._txBody.bodyPr.find(qn(fit)) is not None:
+                    warn("%s: %s, and each app fits text its own way. Use noAutofit"
+                         % (name, fit[2:]))
+            for p in shape.text_frame.paragraphs:
+                pPr = p._p.pPr
+                if pPr is not None and pPr.find("%s/%s" % (qn("a:lnSpc"), qn("a:spcPts"))) is not None:
+                    warn("%s: line spacing in points, which Google Slides cannot store" % name)
+                for r in p.runs:
+                    latin, ea = run_fonts(r)
+                    if HANGUL.search(r.text):
+                        if latin and ea and M._flat(latin) != M._flat(ea):
+                            warn("%s: Hangul in a run whose latin %s and ea %s differ"
+                                 % (name, latin, ea))
+                        elif M._flat(latin or family) not in cjk:
+                            warn("%s: Hangul in %s, not a font known to carry it"
+                                 % (name, latin or family))
+                    if google is not None:
+                        for face in (latin, ea):
+                            if face and not face.startswith("+") and M._flat(face) not in google:
+                                warn("%s: %s is not a Google Fonts family, so Slides draws "
+                                     "it in Arial" % (name, face))
+                for lit, runs in itertools.groupby(p.runs, highlighted):
+                    if lit and len({run_fonts(r) for r in runs}) > 1:
+                        warn("%s: one highlight spans runs in different fonts" % name)
+                if p.runs and p.runs[0].font.size is not None:
+                    pw = M.para_width(shape, p)
+                    ls = M.lines(M.tokens(p, family), p.runs[0].font.size.pt, pw,
+                                 M.wraps(shape))
+                    if ls and pw and max(ls) / pw > PORTABLE_FILL:
+                        warn("%s: a line fills %d percent of its frame, and another app may "
+                             "wrap it" % (name, round(100 * max(ls) / pw)))
+        # A filled shape over some of a frame's lines was placed by a line pitch that
+        # only one renderer keeps. Not visible_shapes: it skips a shape filled only by
+        # its theme style.
+        for band in slide.shapes:
+            if "allow:" in (band.name or "") or not band.width or not band.height \
+                    or (band.has_text_frame and band.text_frame.text.strip()) or not is_filled(band):
+                continue
+            bl, bt, br, bb = box(band)
+            for shape in texts:
+                if "allow:" in (shape.name or ""):
+                    continue
+                l, t, r, b = ink_box(shape, family)
+                if min(br, r) - max(bl, l) <= EPS or min(bb, b) - max(bt, t) <= EPS:
+                    continue
+                if bt > t + EPS or bb < b - EPS:
+                    warn("%s: covers only some lines of %s, by a line pitch other apps "
+                         "do not keep" % (band.name, shape.name))
+
+
 def check_language(prs, rep):
     for i, slide in enumerate(prs.slides):
         n = i + 1
@@ -422,7 +590,7 @@ def check_language(prs, rep):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("deck")
-    ap.add_argument("--tokens", help="a tokens.py to read ML, MR and CONTENT_BOTTOM from")
+    ap.add_argument("--tokens", help="a tokens.py to read ML, MR, CONTENT_BOTTOM and TYPE_SCALE from")
     ap.add_argument("--margins", help="L,R,BOTTOM in inches, overriding everything else")
     ap.add_argument("--font", default="Inter", help="family to measure with")
     ap.add_argument("--eps", type=float, default=EPS, help="overlap tolerance in inches")
@@ -433,6 +601,9 @@ def main():
     ap.add_argument("--include-first", action="store_true")
     ap.add_argument("--lang-check", action="store_true",
                     help="also flag em dashes and middle dots. Off by default.")
+    ap.add_argument("--portable", action="store_true",
+                    help="also flag what renders differently outside LibreOffice. On by "
+                         "itself when the tokens set a TARGET other than pdf or libreoffice.")
     ap.add_argument("--only", help="run only these checks, comma separated")
     ap.add_argument("--strict", action="store_true", help="warnings fail too")
     a = ap.parse_args()
@@ -440,11 +611,11 @@ def main():
     from pptx import Presentation
     prs = Presentation(a.deck)
 
+    T = load_tokens(a.tokens) if a.tokens else None
     if a.margins:
         ml, mr, cb = [float(x) for x in a.margins.split(",")]
         source = "given"
-    elif a.tokens:
-        T = load_tokens(a.tokens)
+    elif T is not None:
         ml, mr, cb = T.ML, T.MR, T.CONTENT_BOTTOM
         source = os.path.basename(a.tokens)
     else:
@@ -466,20 +637,37 @@ def main():
     if run("orphans"):
         check_orphans(prs, rep, a.font, a.min_ratio, a.fill_risk, a.include_first)
     sizes = check_type(prs, rep, a.min_pt) if run("type") else Counter()
+    steps = scale_steps(T.TYPE_SCALE) if getattr(T, "TYPE_SCALE", None) else None
+    used = {}
+    if steps and run("scale"):
+        used = check_scale(prs, rep, T.TYPE_SCALE, getattr(T, "SCALE_SKIP_SLIDES", ()),
+                           getattr(T, "SCALE_SKIP_ABOVE", None))
     if run("gaps"):
         check_gaps(prs, rep, ml, mr, cb, a.gap_budget)
     if a.lang_check and run("language"):
         check_language(prs, rep)
+    target = getattr(T, "TARGET", None)
+    portable = (a.portable or target not in (None, "pdf", "libreoffice")) and run("portable")
+    if portable:
+        check_portable(prs, rep, a.font, target, getattr(T, "CJK_FONTS", ()))
 
     print("deck     %s, %d slides, canvas %.2f x %.2f in"
           % (os.path.basename(a.deck), len(prs.slides),
              prs.slide_width / EMU, prs.slide_height / EMU))
     print("margins  %.2f to %.2f, content bottom %.2f  (%s)" % (ml, mr, cb, source))
+    if portable:
+        print("portable checked for %s" % (target or "any app"))
     if sizes:
         scale = ", ".join("%.1f" % s for s, _n in sorted(sizes.items(), reverse=True))
         print("type     %d sizes in use: %s" % (len(sizes), scale))
         if len(sizes) > 8:
             print("         that is a lot. A scale the audience can read has five or six.")
+    if used:
+        print("scale    %s  (TYPE_SCALE)" % ", ".join("%.1f" % s for s in steps))
+        for n in sorted(used):
+            print("         slide %-3d %s" % (n, ", ".join("%.1f" % s for s in sorted(used[n], reverse=True))))
+    elif T is not None and not steps and run("scale"):
+        print("scale    not checked: %s has no TYPE_SCALE" % os.path.basename(a.tokens))
     print("")
 
     by_check = Counter(r[1] for r in rep.rows)

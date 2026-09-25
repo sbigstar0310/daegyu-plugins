@@ -35,7 +35,19 @@ Say it out loud in your first reply. There are three cases.
   reference is the failure this rule exists to stop. It cost a whole first draft.
 - **This deck continues an existing line and nobody said otherwise.** Then
   `DESIGN_SYSTEM.md` is your spec and `scripts/example_deck_grammar.py` is your
-  starting point. Do not re-extract anything.
+  starting point. Do not re-extract anything, but do write the type scale below
+  if the spec has none.
+
+**Every deck has a type scale with roles before gate 2**, even when the line's
+spec exists. Derive it for this deck, from the user's taste and the design
+structure of the decks before it, not from a fixed table. Propose at least four
+levels, five is common, that the audience can tell apart: neighbouring levels
+differ in at least two of size, weight and colour. Write the chosen scale into
+this deck's `tokens.py` as `TYPE_SCALE`, a dict of role to `(pt, weight, colour)`,
+with the section divider's size or those slides listed in `SCALE_SKIP_SLIDES`. The
+builder may stay the line's own, but every size it sets comes from that scale. A
+spec with sizes and no roles is not a scale: three decks built on one drifted to
+nine sizes half a point apart, and the presenter could not tell emphasis from body.
 
 ### 0.2 Stage gates: content, then design, then build
 
@@ -43,8 +55,9 @@ Three gates. Each needs an explicit yes. Silence is not a yes.
 
 1. **Content.** Slide-by-slide text in a `content.md` the user can read in one
    scroll. Nothing is built until they say so.
-2. **Design.** Two sample slides in the chosen system, one text-heavy and one
-   figure-heavy. Nothing else is built until they say so.
+2. **Design.** The type scale, and two sample slides built from it in the chosen
+   system, one text-heavy and one figure-heavy. Nothing else is built until they
+   say so.
 3. **Build.** Only now write the generator.
 
 **Never default an identity fact.** The presenter's name and its romanization,
@@ -127,6 +140,24 @@ human or agent, cannot see.
 The spec renderer in `scripts/render.py` is the alternative path for decks in the
 house line. See `scripts/SCHEMA.md` for what it can and cannot express.
 
+**Keep to the portable subset** when the deck is shown in anything but LibreOffice.
+Renderers disagree on fonts, autofit, line pitch, scripts and line breaks, and
+these choices keep that disagreement small:
+
+- `noAutofit`, with sizes you measured. LibreOffice refits any autofit its own way.
+- Line spacing as a percentage (`spcPct`), never in points (`spcPts`), which
+  Slides cannot store.
+- One font per run, with `latin` and `ea` the same where one font covers both.
+- A highlight in one font, never split across frames.
+- No shape placed over text by an assumed line pitch.
+- Google Fonts only for a Google Slides talk. Slides draws any other font in Arial.
+- Width slack: no line over about 95 percent of its frame.
+
+`check_layout.py --portable` flags all of these but a highlight split across
+frames, shape by shape, and runs by itself when the tokens set a `TARGET` other
+than `pdf` or `libreoffice`. A clean run is not a render: the deck still gets
+looked at in its target.
+
 ---
 
 ## 3. Verify on a real render, never on a proxy
@@ -167,6 +198,12 @@ caption overlaps hide.
   grow the row and pushes everything below the table down.
 - **Bounds** from the deck's own tokens, a **dead-band** report, **orphan last
   lines**, and a lint for em-dashes and middle dots.
+- **What renders differently outside LibreOffice**, with `--portable` or a
+  `TARGET` in the tokens: the portable subset of section 2.
+- **Sizes off the type scale** the tokens declare as `TYPE_SCALE`: every run more
+  than a quarter point from a step, a scale of fewer than four levels, and the
+  sizes each slide uses. Text inside a figure image is not a run, so check it
+  yourself (section 6).
 
 **A picture's placed height is not what you assumed.** `pic()` returns the size it
 used. Anchor the caption to that (`y + h + CAPTION_GAP`), never to a literal.
@@ -297,6 +334,14 @@ ink. Too many bold or coloured spans reads as scattered. Across a whole deck, on
 a couple of emphasised phrases total. Reserve any status colour for a genuine
 positive or negative.
 
+This presupposes the type scale of section 0.1. One emphasis reads only against
+levels the audience can already tell apart. On text spread over nine sizes it is
+one more variation, and the slide reads as machine-made.
+
+The rule limits emphasis colour, not colour that carries data. A chart's series
+and a diagram's categories keep colours that tell them apart. Stripping them to
+make a slide flatter makes the chart unreadable.
+
 ### Slide structure (bullets must not be a flat pile)
 
 A list of true but unrelated one-liners is the most common structural rejection.
@@ -324,6 +369,12 @@ Every bullet block needs a spine.
   marker break more", show 2 bars, not 3. Recompute the merged rate from the raw
   counts; do not average percentages.
 - Grey out anything the deck is not arguing.
+- **Figure text is on the scale too.** Text inside a placed figure image is at
+  least the smallest level of the deck's scale, on the slide:
+  `px * placed_in / image_px * 72`, where `px` is its font size in image pixels,
+  `placed_in` the placed width in inches and `image_px` the image width in pixels.
+  For matplotlib that is `fontsize * placed_in / figsize_width`. A figure drawn
+  12 in wide and placed at 6 in halves every label.
 
 ---
 

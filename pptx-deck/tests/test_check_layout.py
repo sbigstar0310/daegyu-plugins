@@ -10,8 +10,10 @@ the 4 in box with 0.1 in insets holds 273.6 pt per line.
 import sys
 
 import pytest
+from lxml import etree
 from pptx import Presentation
 from pptx.enum.text import MSO_AUTO_SIZE
+from pptx.oxml.ns import qn
 from pptx.util import Inches, Pt
 
 import check_layout as C
@@ -610,3 +612,204 @@ def test_a_nowrap_frame_renders_as_measured(tmp_path):
     # 0.2 in of insets and four 0.2 in lines fill the 1.00 in frame exactly.
     assert [r[3] for r in overflow(prs).errors()] == [
         "code needs %.2f in of width and has 3.80" % (measured / 72.0)]
+
+
+# ---------------------------------------------------------------- scale
+def sized_slide(prs, *boxes):
+    """A slide with a 0.6 in text box at each (top, sizes), one paragraph per size."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    for top, sizes in boxes:
+        tf = slide.shapes.add_textbox(Inches(1), Inches(top), Inches(4), Inches(0.6)).text_frame
+        for k, pt in enumerate(sizes):
+            r = (tf.paragraphs[0] if k == 0 else tf.add_paragraph()).add_run()
+            r.text, r.font.size = "at %s" % pt, Pt(pt)
+    return slide
+
+
+FOUR = [14, 12, 10, 9]
+
+
+def test_a_size_off_the_scale_is_warned_and_a_quarter_point_is_not():
+    prs = deck()
+    sized_slide(prs, (1.0, [22, 12, 12.25, 11.5, 11.5]))
+    scale = {"title": (22, "semibold", "FFFFFF"), "body": 12, "secondary": 10, "caption": 9}
+    rep = C.Report()
+    assert C.check_scale(prs, rep, scale) == {1: {22.0, 12.0, 12.25, 11.5}}
+    assert rep.warnings() == [
+        ("WARN", "scale", 1, "2 runs at 11.5 pt, not a step of the type scale, such as 'at 11.5'")]
+
+
+def test_the_title_band_and_section_slides_count_unless_the_tokens_mark_them():
+    prs = deck()
+    sized_slide(prs, (2.0, [36]))
+    sized_slide(prs, (0.2, [22]), (1.4, [12]))
+    rep = C.Report()
+    C.check_scale(prs, rep, FOUR)
+    assert [(r[2], r[3][:13]) for r in rep.warnings()] == [(1, "1 run at 36.0"), (2, "1 run at 22.0")]
+    rep = C.Report()
+    assert C.check_scale(prs, rep, FOUR, skip_slides=(1,), skip_above=0.9) == {2: {12.0}}
+    assert rep.warnings() == []
+
+
+@pytest.mark.parametrize("scale, warned", [
+    pytest.param({"title": (22, "bold", "FFFFFF"), "body": 12, "caption": 9}, True, id="three roles"),
+    pytest.param([12, 12, 10, 9], True, id="a repeated size is one level"),
+    pytest.param(FOUR, False, id="four is enough"),
+])
+def test_a_declared_scale_of_fewer_than_four_levels_is_warned(scale, warned):
+    prs = deck()
+    sized_slide(prs, (1.0, [12]))
+    rep = C.Report()
+    C.check_scale(prs, rep, scale)
+    assert rep.warnings() == ([] if not warned else [
+        ("WARN", "scale", None,
+         "TYPE_SCALE declares 3 levels, and a scale the audience can tell apart needs 4")])
+
+
+def test_the_command_reads_type_scale_even_with_margins_given(run_main, tmp_path):
+    prs = deck()
+    sized_slide(prs, (0.2, [22]), (1.4, [12, 11.5]))
+    scaled = tmp_path / "tokens_scaled.py"
+    scaled.write_text("TYPE_SCALE = [22, 14, 12, 9]\n")
+    code, out = run_main(prs, "--tokens", str(scaled), "--only", "scale")
+    assert code == 0
+    assert "scale    22.0, 14.0, 12.0, 9.0  (TYPE_SCALE)\n         slide 1   22.0, 12.0, 11.5\n" in out
+    assert "WARN  scale     slide 1   1 run at 11.5 pt" in out
+    bare = tmp_path / "tokens_bare.py"
+    bare.write_text("ML = 0.5\n")
+    code, out = run_main(prs, "--tokens", str(bare), "--only", "scale")
+    assert "scale    not checked: tokens_bare.py has no TYPE_SCALE" in out
+    assert "0 error, 0 warning" in out
+
+
+# ---------------------------------------------------------------- portable
+HAN = u"\ud55c\uad6d\uc5b4"
+
+
+def portable(prs, target=None):
+    rep = C.Report()
+    C.check_portable(prs, rep, "Inter", target)
+    return [r[3] for r in rep.warnings()]
+
+
+def set_ea(run, typeface):
+    etree.SubElement(run._r.get_or_add_rPr(), qn("a:ea"), typeface=typeface)
+
+
+def mark(run):
+    h = etree.Element(qn("a:highlight"))
+    etree.SubElement(h, qn("a:srgbClr"), val="E6E6E6")
+    run._r.get_or_add_rPr().insert(0, h)
+
+
+def two_runs(tb, second_family, both_marked=True):
+    p = tb.text_frame.paragraphs[0]
+    extra = p.add_run()
+    extra.text, extra.font.size, extra.font.name = " more", Pt(12), second_family
+    mark(p.runs[0])
+    if both_marked:
+        mark(extra)
+
+
+def hangul(latin, ea=None):
+    def edit(tb):
+        r = tb.text_frame.paragraphs[0].runs[0]
+        r.text, r.font.name = HAN, latin
+        if ea:
+            set_ea(r, ea)
+    return edit
+
+
+def test_the_test_frame_is_portable():
+    prs = deck()
+    text_box(prs, 3.0, TEN)
+    assert portable(prs) == []
+
+
+@pytest.mark.parametrize("edit, expected", [
+    pytest.param(lambda tb: setattr(tb.text_frame, "auto_size", MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT),
+                 "box: spAutoFit, and each app fits text its own way. Use noAutofit", id="spAutoFit"),
+    pytest.param(lambda tb: setattr(tb.text_frame, "auto_size", MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE),
+                 "box: normAutofit, and each app fits text its own way. Use noAutofit",
+                 id="normAutofit"),
+    pytest.param(lambda tb: setattr(tb.text_frame.paragraphs[0], "line_spacing", Pt(18)),
+                 "box: line spacing in points, which Google Slides cannot store", id="spcPts"),
+    pytest.param(hangul("Inter"), "box: Hangul in Inter, not a font known to carry it",
+                 id="hangul in a latin font"),
+    pytest.param(hangul("Noto Sans KR", "Malgun Gothic"),
+                 "box: Hangul in a run whose latin Noto Sans KR and ea Malgun Gothic differ",
+                 id="hangul with two fonts"),
+    pytest.param(hangul("Noto Sans KR", "Noto Sans KR"), None, id="hangul in one CJK font"),
+    pytest.param(lambda tb: two_runs(tb, "Mono"),
+                 "box: one highlight spans runs in different fonts", id="highlight across fonts"),
+    pytest.param(lambda tb: two_runs(tb, "Inter"), None, id="highlight in one font"),
+    pytest.param(lambda tb: two_runs(tb, "Mono", both_marked=False), None,
+                 id="highlight ends where the font changes"),
+])
+def test_each_portable_flag(edit, expected):
+    prs = deck()
+    edit(text_box(prs, 3.0, TEN))
+    assert portable(prs) == ([] if expected is None else [expected])
+
+
+@pytest.mark.parametrize("top, height, name, flagged", [
+    pytest.param(1.30, 0.20, "band", True, id="behind the middle line"),
+    pytest.param(1.00, 1.00, "band", False, id="behind every line"),
+    pytest.param(1.30, 0.20, "allow: a marker on line two", False, id="allowed"),
+])
+def test_a_filled_shape_over_some_lines_is_flagged(fonts, top, height, name, flagged):
+    # Three lines at 14.4 pt from y 1.1: the text runs from 1.10 to 1.70 in.
+    fonts("Inter-hash.ttf", "Inter", "Regular")
+    prs = deck()
+    text_box(prs, 1.0, TEN[:3])
+    band = prs.slides[0].shapes.add_shape(1, Inches(1), Inches(top), Inches(4), Inches(height))
+    band.name = name
+    assert portable(prs) == (["band: covers only some lines of box, by a line pitch other apps "
+                              "do not keep"] if flagged else [])
+
+
+@pytest.mark.parametrize("family, flagged", [
+    pytest.param("Inter", False, id="a Google font"),
+    pytest.param("Arial", False, id="a web font Slides has"),
+    pytest.param("Calibri", True, id="drawn in Arial"),
+])
+def test_google_slides_wants_google_fonts(family, flagged):
+    prs = deck()
+    text_box(prs, 3.0, TEN, family=family)
+    assert portable(prs) == []
+    assert portable(prs, "google-slides") == (
+        ["box: %s is not a Google Fonts family, so Slides draws it in Arial" % family]
+        if flagged else [])
+
+
+@pytest.mark.parametrize("text, wrap, percent", [
+    pytest.param("x" * 40, True, None, id="88 percent"),
+    pytest.param("x" * 45, True, 99, id="99 percent"),
+    pytest.param("x" * 30 + " " + "x" * 20, True, None, id="wraps to 66 percent"),
+    pytest.param("x" * 30 + " " + "x" * 20, False, 112, id="never wraps, so 112 percent"),
+])
+def test_a_line_over_95_percent_of_its_frame_is_flagged(fonts, text, wrap, percent):
+    # 273.6 pt inside the frame, 6 pt a character.
+    fonts("Inter-hash.ttf", "Inter", "Regular")
+    prs = deck()
+    text_box(prs, 3.0, [text]).text_frame.word_wrap = wrap
+    assert portable(prs) == (["box: a line fills %d percent of its frame, and another app may "
+                              "wrap it" % percent] if percent else [])
+
+
+@pytest.mark.parametrize("target, runs", [
+    pytest.param("google-slides", True, id="on for google slides"),
+    pytest.param("powerpoint", True, id="on for powerpoint"),
+    pytest.param("pdf", False, id="off for a pdf talk"),
+])
+def test_a_target_in_the_tokens_turns_portable_on(run_main, tmp_path, target, runs):
+    prs = deck()
+    tb = text_box(prs, 3.0, TEN)
+    tb.text_frame.auto_size = MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT
+    tokens = tmp_path / ("tokens_%s.py" % target.replace("-", "_"))
+    tokens.write_text('TARGET = "%s"\n' % target)
+    _code, out = run_main(prs, "--tokens", str(tokens), "--only", "portable")
+    assert ("portable checked for %s" % target in out) == runs
+    assert ("WARN  portable  slide 1   box: spAutoFit" in out) == runs
+    _code, out = run_main(prs, "--portable", "--only", "portable")
+    assert "portable checked for any app" in out
