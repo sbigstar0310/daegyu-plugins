@@ -143,17 +143,48 @@ def font_file(family, bold):
     return _file_cache[key]
 
 
+def resolve(family, bold):
+    """(path, synthesised). A bold with no Bold file is measured with the Regular:
+    LibreOffice draws that bold by stroking the Regular glyphs, which leaves every
+    advance as it was, so the Regular file is exact against its render. Against a
+    machine that has the real Bold it is exact only for a fixed-pitch family."""
+    path = font_file(family, bold)
+    if path is not None or not bold:
+        return path, False
+    path = font_file(family, False)
+    return path, path is not None
+
+
+# Glyphs whose widths differ in any proportional font.
+PITCH_PROBE = "iWMl."
+SYNTHESISED = "LibreOffice synthesises it; a real Bold can be up to ~7% wider"
+
+
+def is_fixed_pitch(family):
+    """True when every probe glyph of the Regular has the same advance."""
+    f = font(family, False, 12)
+    return f is not None and len({f.getlength(c) for c in PITCH_PROBE}) == 1
+
+
 def missing_fonts(toks):
     """{(family, bold)} a paragraph needs and has no file for. lines() returns None
     for such a paragraph, and a caller that skips it must say so."""
     return {(family, bool(bold)) for w, bold, family in toks
-            if w != BREAK and font_file(family, bold) is None}
+            if w != BREAK and resolve(family, bold)[0] is None}
+
+
+def synthesised_fonts(toks):
+    """{family} whose bold a paragraph measures with the Regular, for a family where
+    that is only an approximation: a proportional one. A caller reports these."""
+    return {family for w, bold, family in toks
+            if w != BREAK and bold and resolve(family, True)[1]
+            and not is_fixed_pitch(family)}
 
 
 def font(family, bold, size_pt):
     key = (family, bool(bold), round(size_pt * SCALE))
     if key not in _font_cache:
-        path = font_file(family, bold)
+        path = resolve(family, bold)[0]
         _font_cache[key] = (ImageFont.truetype(path, int(round(size_pt * SCALE)))
                             if path else None)
     return _font_cache[key]
@@ -432,12 +463,21 @@ def main():
     rows = report(prs, a.font, a.min_ratio, skip_first, a.fill_risk)
     # A paragraph in a font with no file was never measured, so it did not pass.
     missed = {}
+    synthesised = {}
     unmeasured = 0
     for n, _shape, _p, toks in paragraphs(prs, a.font, skip_first):
         keys = missing_fonts(toks)
         unmeasured += bool(keys)
         for key in keys:
             missed.setdefault(key, []).append(n)
+        for family in synthesised_fonts(toks):
+            synthesised.setdefault(family, []).append(n)
+    for family, found_on in sorted(synthesised.items()):
+        slides = sorted(set(found_on))
+        print('  note: %d paragraph%s measured with "%s" Regular for bold, on slide%s %s (%s)'
+              % (len(found_on), "" if len(found_on) == 1 else "s", family,
+                 "" if len(slides) == 1 else "s", ", ".join(str(s) for s in slides),
+                 SYNTHESISED))
     if not rows and not missed:
         print("no orphans, no paragraphs at risk")
         return 0

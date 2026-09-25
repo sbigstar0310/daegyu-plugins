@@ -262,8 +262,22 @@ def check_overlap(prs, rep, eps, family):
                         % (shapes[a].name, shapes[c].name, ox, oy))
 
 
+def warn_synthesised(rep, check, synthesised):
+    """synthesised is {family: {(slide, shape_id)}}: frames measured with the
+    Regular for a bold in a proportional family. That matches LibreOffice here and
+    not a machine with the real Bold, so it is a measurement, not a pass."""
+    for family, frames in sorted(synthesised.items()):
+        slides = sorted({n for n, _id in frames})
+        rep.add("WARN", check, None,
+                '%d frame%s measured with "%s" Regular for bold, on slide%s %s (%s)'
+                % (len(frames), "" if len(frames) == 1 else "s", family,
+                   "" if len(slides) == 1 else "s", ", ".join(str(n) for n in slides),
+                   M.SYNTHESISED))
+
+
 def check_overflow(prs, rep, family):
     missed = {}
+    synthesised = {}
     for i, slide in enumerate(prs.slides):
         n = i + 1
         for shape in visible_shapes(slide):
@@ -291,6 +305,8 @@ def check_overflow(prs, rep, family):
                     fonts |= M.missing_fonts(toks)
                     continue
                 measured = True
+                for face in M.synthesised_fonts(toks):
+                    synthesised.setdefault(face, set()).add((n, shape.shape_id))
                 need += para_height(p, size, len(ls), k == 0, k == len(paras) - 1) / 72.0
                 # The paragraph's own left margin comes out of the width too.
                 need_w = max(need_w, (max(ls) / 72.0) + (inner_w - pw / 72.0))
@@ -309,6 +325,7 @@ def check_overflow(prs, rep, family):
                 for key in fonts:
                     missed.setdefault(key, set()).add((n, shape.shape_id))
     warn_unmeasured(rep, "overflow", missed)
+    warn_synthesised(rep, "overflow", synthesised)
 
 
 def check_orphans(prs, rep, family, min_ratio, fill, include_first):
@@ -316,10 +333,14 @@ def check_orphans(prs, rep, family, min_ratio, fill, include_first):
         rep.add("WARN" if kind == "at risk" else "ERROR", "orphans", n,
                 "%s: %s" % (kind, text[:64]))
     missed = {}
+    synthesised = {}
     for n, shape, _p, toks in M.paragraphs(prs, family, not include_first):
         for key in M.missing_fonts(toks):
             missed.setdefault(key, set()).add((n, shape.shape_id))
+        for face in M.synthesised_fonts(toks):
+            synthesised.setdefault(face, set()).add((n, shape.shape_id))
     warn_unmeasured(rep, "orphans", missed)
+    warn_synthesised(rep, "orphans", synthesised)
 
 
 def check_type(prs, rep, min_pt):

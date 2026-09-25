@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Shared fixtures. No test measures with a font installed on the machine: the
 `fonts` fixture points the font search at an empty directory and writes only the
-fonts a test asks for, in which every glyph is exactly half an em wide.
+fonts a test asks for, in which every glyph is exactly half an em wide unless the
+test names the glyphs that differ.
 
 fontTools is imported without a fallback on purpose. A test suite that skips
 itself when a font tool is missing would repeat the bug it guards against.
@@ -20,10 +21,12 @@ sys.path.insert(0, os.path.abspath(SCRIPTS))
 import fix_orphans as M  # noqa: E402
 
 
-def make_font(path, family, style, typographic=None):
+def make_font(path, family, style, typographic=None, widths=None):
     """A TrueType font whose printable ASCII glyphs all advance 500 of 1000 units.
     typographic is (nameID 16, nameID 17), for a static instance that keeps its
-    weight in the legacy family name, such as "Inter SemiBold" / "Regular"."""
+    weight in the legacy family name, such as "Inter SemiBold" / "Regular".
+    widths is {character: advance} for the glyphs that differ, which makes the
+    font proportional."""
     chars = list(range(32, 127))
     order = [".notdef"] + ["u%04X" % c for c in chars]
     fb = FontBuilder(1000, isTTF=True)
@@ -40,7 +43,8 @@ def make_font(path, family, style, typographic=None):
             pen.closePath()
         glyphs[name] = pen.glyph()
     fb.setupGlyf(glyphs)
-    fb.setupHorizontalMetrics({n: (500, 0) for n in order})
+    advance = {"u%04X" % ord(c): w for c, w in (widths or {}).items()}
+    fb.setupHorizontalMetrics({n: (advance.get(n, 500), 0) for n in order})
     fb.setupHorizontalHeader(ascent=800, descent=-200)
     names = {"familyName": family, "styleName": style}
     if typographic:
@@ -56,6 +60,7 @@ def fonts(tmp_path, monkeypatch):
     """An empty font path with cold caches. Call it to add a font:
 
         fonts("Inter-hash.ttf", "Inter", "Regular")
+        fonts("Sans.ttf", "Sans", "Regular", widths={"i": 250, "W": 900})
 
     A test that requests it and adds nothing runs on a machine with no fonts."""
     font_dir = tmp_path / "fonts"
@@ -65,9 +70,9 @@ def fonts(tmp_path, monkeypatch):
     monkeypatch.setattr(M, "_font_cache", {})
     monkeypatch.setattr(M, "_name_table", None)
 
-    def add(filename, family, style, typographic=None):
+    def add(filename, family, style, typographic=None, widths=None):
         path = str(font_dir / filename)
-        make_font(path, family, style, typographic)
+        make_font(path, family, style, typographic, widths)
         # A lookup made before this font existed must not answer for it.
         M._file_cache.clear()
         M._font_cache.clear()

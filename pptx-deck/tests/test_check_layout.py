@@ -165,9 +165,11 @@ def test_a_telling_file_name_is_still_enough(fonts):
 
 
 def test_missing_fonts_names_each_family_and_weight(fonts):
+    # A bold with a Regular to stand in for it is measured, so it is not missing.
     fonts("Inter-a1.ttf", "Inter", "Regular")
-    toks = [("lead", True, "Inter"), ("body", False, "Inter"), ("code", False, "Mono")]
-    assert M.missing_fonts(toks) == {("Inter", True), ("Mono", False)}
+    toks = [("lead", True, "Inter"), ("body", False, "Inter"), ("code", False, "Mono"),
+            ("bold", True, "Mono")]
+    assert M.missing_fonts(toks) == {("Mono", False), ("Mono", True)}
 
 
 # ---------------------------------------------------------------- overflow
@@ -204,7 +206,8 @@ def test_an_unmeasured_frame_is_a_warning_not_a_pass(fonts):
 
 
 def test_the_missing_weight_is_named(fonts):
-    fonts("Inter-hash.ttf", "Inter", "Regular")
+    # With no Regular to stand in, a bold frame cannot be measured at all.
+    fonts("Mono-hash.ttf", "Mono", "Regular")
     prs = deck()
     text_box(prs, 3.0, TEN, bold=True)
     assert [r[3] for r in overflow(prs).warnings()] == [
@@ -230,6 +233,80 @@ def test_a_partly_measured_frame_that_fits_is_still_reported(fonts):
     assert rep.errors() == []
     assert [r[3] for r in rep.warnings()] == [
         '1 frame not measured: font "Mono" not found, on slide 1']
+
+
+# ---------------------------------------------------------------- bold with no Bold file
+# LibreOffice draws a bold it has no file for by stroking the Regular glyphs, which
+# leaves every advance as it was. So the Regular file measures that bold exactly,
+# and for a fixed-pitch family it matches a real Bold too. The test font "Sans"
+# is proportional: i and W differ from the half-em rest.
+PROPORTIONAL = {"i": 250, "W": 900, "M": 800, ".": 250}
+SYNTH = ('%d frame%s measured with "Sans" Regular for bold, on slide%s %s '
+         '(LibreOffice synthesises it; a real Bold can be up to ~7%% wider)')
+
+
+def test_bold_without_a_bold_file_is_measured_with_regular(fonts):
+    regular = fonts("Mono-hash.ttf", "Mono", "Regular")
+    assert M.font_file("Mono", True) is None
+    assert M.resolve("Mono", True) == (regular, True)
+    assert M.resolve("Mono", False) == (regular, False)
+    prs = deck()
+    text_box(prs, 1.90, TEN, family="Mono", bold=True, name="bold_mono")
+    rep = overflow(prs)
+    assert [r[3] for r in rep.errors()] == ["bold_mono needs 2.20 in of height and has 1.90"]
+    assert rep.warnings() == []
+
+
+def test_a_bold_lead_in_no_longer_drops_the_frame(fonts):
+    fonts("Mono-hash.ttf", "Mono", "Regular")
+    prs = deck()
+    tb = text_box(prs, 1.90, TEN, family="Mono", name="lead_in")
+    lead = tb.text_frame.paragraphs[0].runs[0]
+    lead.font.bold = True
+    rest = tb.text_frame.paragraphs[0].add_run()
+    rest.text, rest.font.name, rest.font.size = " and the rest", "Mono", Pt(12)
+    rep = overflow(prs)
+    assert [r[3] for r in rep.errors()] == ["lead_in needs 2.20 in of height and has 1.90"]
+    assert rep.warnings() == []
+
+
+def test_a_real_bold_file_is_still_preferred(fonts):
+    fonts("Mono-a1.ttf", "Mono", "Regular")
+    bold = fonts("Mono-b2.ttf", "Mono", "Bold", widths={"x": 625})
+    assert M.resolve("Mono", True) == (bold, False)
+    # 12 pt at 0.625 em is 7.5 pt a glyph: two of them are 15 pt.
+    assert M.lines([("xx", True, "Mono")], 12, 1000) == [15.0]
+    assert M.lines([("xx", False, "Mono")], 12, 1000) == [12.0]
+    assert M.synthesised_fonts([("xx", True, "Mono")]) == set()
+
+
+def test_is_fixed_pitch(fonts):
+    fonts("Mono-hash.ttf", "Mono", "Regular")
+    fonts("Sans-hash.ttf", "Sans", "Regular", widths=PROPORTIONAL)
+    assert M.is_fixed_pitch("Mono") is True
+    assert M.is_fixed_pitch("Sans") is False
+
+
+def test_proportional_bold_is_measured_and_flagged(fonts):
+    fonts("Sans-hash.ttf", "Sans", "Regular", widths=PROPORTIONAL)
+    prs = deck()
+    text_box(prs, 1.90, TEN, family="Sans", bold=True, name="bold_sans")
+    text_box(prs, 3.00, TEN, family="Sans", bold=True, name="fits")
+    text_box(prs, 3.00, TEN, family="Sans", name="regular_only")
+    rep = overflow(prs)
+    assert [r[3] for r in rep.errors()] == ["bold_sans needs 2.20 in of height and has 1.90"]
+    assert rep.warnings() == [("WARN", "overflow", None, SYNTH % (2, "s", "s", "1, 2"))]
+    assert M.synthesised_fonts([("x", True, "Sans"), ("\v", True, "Sans")]) == {"Sans"}
+
+
+def test_a_proportional_bold_in_the_orphan_check_is_flagged_too(fonts):
+    fonts("Sans-hash.ttf", "Sans", "Regular", widths=PROPORTIONAL)
+    prs = deck()
+    for _ in range(2):
+        text_box(prs, 3.0, TEN, family="Sans", bold=True)
+    rep = C.Report()
+    C.check_orphans(prs, rep, "Sans", 0.34, M.AT_RISK_FILL, include_first=False)
+    assert rep.warnings() == [("WARN", "orphans", None, SYNTH % (1, "", "", "2"))]
 
 
 # ---------------------------------------------------------------- orphans
@@ -442,6 +519,24 @@ def test_fix_orphans_counts_a_paragraph_once_whatever_it_lacks(fonts, tmp_path,
     assert 'not measured: 1 paragraph, font "Mono" bold not found, on slide 2' in out
     assert 'not measured: 1 paragraph, font "Mono" not found, on slide 2' in out
     assert out.rstrip().endswith("0 orphan, 0 at risk, 1 not measured")
+
+
+@pytest.mark.parametrize("family, widths, note", [
+    ("Mono", None, False), ("Sans", PROPORTIONAL, True)], ids=["fixed-pitch", "proportional"])
+def test_fix_orphans_measures_a_bold_it_has_no_file_for(fonts, tmp_path, monkeypatch, capsys,
+                                                       family, widths, note):
+    fonts("Face-hash.ttf", family, "Regular", widths=widths)
+    prs = deck()
+    for _ in range(2):
+        text_box(prs, 3.0, ["short bold line"], family=family, bold=True)
+    path = str(tmp_path / "deck.pptx")
+    prs.save(path)
+    monkeypatch.setattr(sys, "argv", ["fix_orphans.py", path, "--font", family])
+    assert M.main() == 0
+    out = capsys.readouterr().out
+    assert "not measured" not in out
+    assert ('measured with "%s" Regular for bold' % family in out) is note
+    assert "no orphans, no paragraphs at risk" in out
 
 
 def test_the_issue_repro_fails_the_command(fonts, run_main):
