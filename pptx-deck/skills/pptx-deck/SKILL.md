@@ -279,7 +279,7 @@ touched this round. The contact sheet is where caption overlaps hide.
 - **Table rows that grow.** A cell that wraps one line further makes PowerPoint
   grow the row and pushes everything below the table down.
 - **Bounds** from the deck's own tokens, a **dead-band** report, **orphan last
-  lines**, and a lint for em-dashes and middle dots.
+  lines**, and a lint for em-dashes and middle dots in the slides and the notes.
 - **What renders differently outside LibreOffice**, with `--portable` or a
   `TARGET` in the tokens: the portable subset of section 2.
 - **Sizes off the type scale** the tokens declare as `TYPE_SCALE`: every run more
@@ -311,9 +311,10 @@ presenter: short sentences, common words, one idea per sentence, no idioms, no
 clauses stacked two deep. This binds harder on the speaker notes than on the
 slides, because those are said out loud. A word the presenter cannot pronounce is
 worse than a word the audience does not know. `check_layout.py --lang-check`
-reports the longest sentence per slide and words outside a common list, as
-warnings you can wave off. If the presenter hand-edits slides themselves,
-proofread and offer corrections as a list they can reject.
+reports the longest sentence on each slide and in its notes when it runs past 20
+words (`--max-words` to change it), as warnings you can wave off. No script judges
+the words themselves: read for them. If the presenter hand-edits slides
+themselves, proofread and offer corrections as a list they can reject.
 
 **No em-dashes and no middle dots.** Both read as machine-written. Use colons,
 commas, periods, parentheses, or a vertical bar. This applies to separators,
