@@ -9,7 +9,8 @@
     python3 scripts/check_layout.py deck.pptx --lang-check --max-words 25
     python3 scripts/check_layout.py deck.pptx --portable
 
-Nine checks, most of them arithmetic on real coordinates and real font metrics:
+Nine checks. All but portable and language are arithmetic on real coordinates and
+real font metrics:
 
   bounds     a shape that leaves the canvas, or crosses the content margins
   overlap    two shapes whose boxes intersect by more than a hairline
