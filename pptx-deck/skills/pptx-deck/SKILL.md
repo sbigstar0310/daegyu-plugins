@@ -116,7 +116,7 @@ the project.
 
 | Need | Missing means |
 |---|---|
-| LibreOffice | No real renders. `brew install --cask libreoffice`. The bundled previewer uses a proxy font and cannot tell you where a line breaks |
+| LibreOffice | No real renders. `brew install --cask libreoffice`. The bundled previewer uses a proxy font and cannot tell you where a line breaks. Installed where the scripts do not look (no root, an extracted .deb)? `export PPTX_DECK_SOFFICE=/path/to/program/soffice` |
 | The deck's font, visible to LibreOffice | Silent substitution, so every line break you check is fiction |
 | `claude-image-generation` plugin | No generated art. You install it on a yes, as above |
 | `jq` | The image plugin's scripts fail. Preflight gives an install that needs no sudo |

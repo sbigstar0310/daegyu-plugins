@@ -32,6 +32,9 @@ by its page number.
 A render older than the deck is not evidence. Any PNG or PDF left from a previous
 run is deleted before this one starts, and the deck's own mtime is printed.
 
+LibreOffice itself is found by soffice.py: $PPTX_DECK_SOFFICE or $SOFFICE first,
+then PATH, then the usual install locations. The one used is printed.
+
 LibreOffice substitutes a missing font in silence. Every family the deck names is
 resolved against the font directories first, and a missing one is a hard error,
 because every line break in the output would be fiction. A missing Bold whose
@@ -53,6 +56,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fix_orphans import font_file  # noqa: E402
 from uno_pdf import find_python as find_uno_python  # noqa: E402
+from soffice import explain, find_soffice  # noqa: E402,F401
 
 UNO_PDF = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uno_pdf.py")
 
@@ -63,18 +67,6 @@ PDF_WITH_HIDDEN = 'pdf:impress_pdf_Export:{"ExportHiddenSlides":{"type":"boolean
 SHEET_DPI = 120    # the whole deck in one look, as SKILL.md reviews it
 SHEET_COLUMNS = 4
 SHEET_PAD = 16     # pixels between tiles, and under each for its label
-
-SOFFICE = [
-    "/Applications/LibreOffice.app/Contents/MacOS/soffice",
-    "/usr/bin/soffice", "/usr/local/bin/soffice", "/snap/bin/libreoffice",
-]
-
-
-def find_soffice():
-    for p in SOFFICE:
-        if os.path.exists(p):
-            return p
-    return shutil.which("soffice") or shutil.which("libreoffice")
 
 
 def families(prs):
@@ -164,11 +156,8 @@ def main():
 
     soffice = find_soffice()
     if not soffice:
-        sys.stderr.write(
-            "LibreOffice is not installed, and there is no other way to see the real\n"
-            "line breaks. Install it:\n"
-            "    brew install --cask libreoffice        # macOS\n"
-            "    sudo apt-get install -y libreoffice    # Debian or Ubuntu\n")
+        sys.stderr.write(explain() or "LibreOffice (soffice) was not found.\n")
+        sys.stderr.write("Without it there is no way to see the real line breaks.\n")
         return 2
 
     used = families(prs)
@@ -205,6 +194,7 @@ def main():
     print("deck    %s" % deck)
     print("        modified %s" % time.strftime("%Y-%m-%d %H:%M:%S",
                                                 time.localtime(os.path.getmtime(deck))))
+    print("soffice %s" % soffice)
 
     pdf = os.path.join(out, os.path.splitext(os.path.basename(deck))[0] + ".pdf")
     # LibreOffice can fail to write and still exit 0, and an old PDF in its place
