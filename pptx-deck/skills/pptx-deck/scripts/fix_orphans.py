@@ -25,6 +25,10 @@ Exit code 1 means an orphan is left. 2 means something could not be measured: th
 --font has no file, or a paragraph asks for a font that has none. A paragraph that
 was not measured is listed, never counted as clean.
 
+Text inside a group or a table cell is checked like any other: text_frames()
+finds every place text lives and says where it is drawn. A cell's font is shrunk,
+never its column, which would change every cell under it.
+
 The measuring helpers are importable. check_layout.py uses them.
 """
 import argparse
@@ -34,6 +38,8 @@ import sys
 
 from PIL import ImageFont
 from pptx import Presentation
+from pptx.oxml.ns import qn
+from pptx.shapes.group import GroupShape
 from pptx.util import Pt
 
 # PIL quantises to integer pixels, so measure at 4x and divide. Without this a
@@ -199,10 +205,106 @@ def run_family(run, default):
 BREAK = "\v"
 
 
+class Frame(object):
+    """One place text lives, placed on the slide. left, top, width and height are
+    EMU in slide coordinates, as a top-level shape's are; a group's child is
+    mapped through each group it sits in. The group scales the box and never the
+    type, so a child 8 in wide in a group drawn at half size wraps at 4 in.
+
+    shape is what an edit changes: the shape itself, or the table that holds a
+    cell. key tells one frame from another on its slide, and cell is (row, column,
+    rows spanned) for a table cell and None otherwise."""
+
+    def __init__(self, shape, text_frame, left, top, width, height, insets, wrap,
+                 kind, key, name, cell=None, scale=(1.0, 1.0)):
+        self.shape = shape
+        self.text_frame = text_frame
+        self.left, self.top, self.width, self.height = left, top, width, height
+        self.insets = insets            # (left, right, top, bottom), EMU
+        self.wrap = wrap
+        self.kind = kind                # "shape", "child" or "cell"
+        self.key = key
+        self.name = name
+        self.cell = cell
+        self.scale = scale
+
+
+IDENTITY = (1.0, 0.0, 1.0, 0.0)         # (sx, tx, sy, ty): slide = child * s + t
+
+
+def _group_transform(group, outer):
+    """The transform of a group's children, composed with the one it sits in."""
+    xfrm = group._element.find(qn("p:grpSpPr")).find(qn("a:xfrm"))
+    if xfrm is None:
+        return outer
+
+    def pair(tag, a, b):
+        el = xfrm.find(qn(tag))
+        return (int(el.get(a)), int(el.get(b))) if el is not None else (0, 0)
+
+    (ox, oy), (cx, cy) = pair("a:off", "x", "y"), pair("a:ext", "cx", "cy")
+    (chx, chy), (chcx, chcy) = pair("a:chOff", "x", "y"), pair("a:chExt", "cx", "cy")
+    gx = cx / float(chcx) if chcx else 1.0
+    gy = cy / float(chcy) if chcy else 1.0
+    sx, tx, sy, ty = outer
+    return (sx * gx, sx * (ox - chx * gx) + tx, sy * gy, sy * (oy - chy * gy) + ty)
+
+
+def _cell_frames(gf, xf):
+    sx, tx, sy, ty = xf
+    tbl = gf.table
+    widths = [col.width for col in tbl.columns]
+    heights = [row.height for row in tbl.rows]
+    for r in range(len(heights)):
+        for c in range(len(widths)):
+            cell = tbl.cell(r, c)
+            # A cell under a merge draws nothing; the merge origin holds the text.
+            if cell.is_spanned:
+                continue
+            left = (gf.left or 0) + sum(widths[:c])
+            top = (gf.top or 0) + sum(heights[:r])
+            yield Frame(gf, cell.text_frame, left * sx + tx, top * sy + ty,
+                        sum(widths[c:c + cell.span_width]) * sx,
+                        sum(heights[r:r + cell.span_height]) * sy,
+                        (cell.margin_left, cell.margin_right, cell.margin_top,
+                         cell.margin_bottom),
+                        True, "cell", (gf.shape_id, r, c),
+                        "%s row %d col %d" % (gf.name, r + 1, c + 1),
+                        cell=(r, c, cell.span_height), scale=(sx, sy))
+
+
+def text_frames(shapes, _xf=IDENTITY):
+    """A Frame for every place text lives among these shapes: each shape with a
+    text frame, the shapes inside each group at any depth, and each table cell. A
+    cell always wraps, and its width is its columns less its own margins."""
+    sx, tx, sy, ty = _xf
+    for shape in shapes:
+        if isinstance(shape, GroupShape):
+            for f in text_frames(shape.shapes, _group_transform(shape, _xf)):
+                yield f
+        elif getattr(shape, "has_table", False):
+            for f in _cell_frames(shape, _xf):
+                yield f
+        elif shape.has_text_frame:
+            tf = shape.text_frame
+            yield Frame(shape, tf, (shape.left or 0) * sx + tx, (shape.top or 0) * sy + ty,
+                        (shape.width or 0) * sx, (shape.height or 0) * sy,
+                        (tf.margin_left or 0, tf.margin_right or 0,
+                         tf.margin_top or 0, tf.margin_bottom or 0),
+                        tf.word_wrap is not False,
+                        "shape" if _xf == IDENTITY else "child", (shape.shape_id,),
+                        shape.name, scale=(sx, sy))
+
+
+def as_frame(shape):
+    """A shape, or a Frame already."""
+    return shape if isinstance(shape, Frame) else next(text_frames([shape]))
+
+
 def wraps(shape):
     """False only for a frame that says wrap="none". A frame that says nothing
-    takes PowerPoint's default, which wraps."""
-    return shape.text_frame.word_wrap is not False
+    takes PowerPoint's default, which wraps. Takes a shape or a Frame."""
+    return as_frame(shape).wrap
 
 
 def tokens(p, default_family):
@@ -279,13 +381,14 @@ def lines(toks, size_pt, width_pt, wrap=True):
 
 
 def para_width(shape, p):
-    """Usable width of one paragraph in points: the box minus its insets and minus
-    the paragraph's own left margin, which a bulleted paragraph always has."""
-    tf = shape.text_frame
-    inset = ((tf.margin_left or 0) + (tf.margin_right or 0)) / 12700.0
+    """Usable width of one paragraph in points: the box as drawn minus its insets
+    and minus the paragraph's own left margin, which a bulleted paragraph always
+    has. Takes a shape or a Frame."""
+    f = as_frame(shape)
+    inset = (f.insets[0] + f.insets[1]) / 12700.0
     pPr = p._p.pPr
     marl = int(pPr.get("marL", 0)) / 12700.0 if pPr is not None else 0.0
-    return shape.width / 12700.0 - inset - marl
+    return f.width / 12700.0 - inset - marl
 
 
 def orphan(toks, size_pt, width_pt, min_ratio):
@@ -320,21 +423,21 @@ def fill_ratio(toks, size_pt, width_pt):
 
 
 def paragraphs(prs, default_family, skip_first):
+    """(slide_number, frame, paragraph, tokens) for every paragraph that can be
+    measured, in groups and table cells too."""
     for si, slide in enumerate(prs.slides):
         if skip_first and si == 0:
             continue
-        for shape in slide.shapes:
-            if not shape.has_text_frame or shape.shape_type == 19:  # 19 = table
-                continue
+        for frame in text_frames(slide.shapes):
             # A frame that never wraps cannot leave a short last line.
-            if not wraps(shape):
+            if not frame.wrap:
                 continue
-            for p in shape.text_frame.paragraphs:
+            for p in frame.text_frame.paragraphs:
                 if not p.runs or p.runs[0].font.size is None:
                     continue
                 toks = tokens(p, default_family)
                 if toks:
-                    yield si + 1, shape, p, toks
+                    yield si + 1, frame, p, toks
 
 
 def report(prs, default_family="Inter", min_ratio=0.34, skip_first=True,
@@ -343,9 +446,9 @@ def report(prs, default_family="Inter", min_ratio=0.34, skip_first=True,
     kind is "orphan" for a short last line that is already there, and "at risk"
     for one that appears as soon as the metrics shift slightly."""
     out = []
-    for n, shape, p, toks in paragraphs(prs, default_family, skip_first):
+    for n, frame, p, toks in paragraphs(prs, default_family, skip_first):
         size = p.runs[0].font.size.pt
-        pw = para_width(shape, p)
+        pw = para_width(frame, p)
         bad, count = orphan(toks, size, pw, min_ratio)
         text = text_of(toks)
         if bad:
@@ -362,13 +465,11 @@ def fix(prs, default_family="Inter", min_ratio=0.34, min_scale=0.84,
     for si, slide in enumerate(prs.slides):
         if skip_first and si == 0:
             continue
-        for shape in slide.shapes:
-            if not shape.has_text_frame or shape.shape_type == 19:
-                continue
+        for frame in text_frames(slide.shapes):
             # Narrowing a frame that never wraps only pushes more of it outside.
-            if not wraps(shape):
+            if not frame.wrap:
                 continue
-            tf = shape.text_frame
+            tf = frame.text_frame
 
             # Pass 1: shrink the font of the offending paragraph until the short
             # last line disappears, or until the text needs one line fewer.
@@ -379,7 +480,7 @@ def fix(prs, default_family="Inter", min_ratio=0.34, min_scale=0.84,
                 if not toks:
                     continue
                 size = p.runs[0].font.size.pt
-                pw = para_width(shape, p)
+                pw = para_width(frame, p)
                 bad, n0 = orphan(toks, size, pw, min_ratio)
                 if not bad:
                     continue
@@ -394,21 +495,24 @@ def fix(prs, default_family="Inter", min_ratio=0.34, min_scale=0.84,
                         break
 
             # Pass 2: if a paragraph is still orphaned, narrow the whole box. A
-            # narrower box pulls a word down onto the last line.
+            # narrower box pulls a word down onto the last line. A cell has no box
+            # of its own: its column is every cell above and below it too.
+            if frame.kind == "cell":
+                continue
             paras = []
             for p in tf.paragraphs:
                 if not p.runs or p.runs[0].font.size is None:
                     continue
                 toks = tokens(p, default_family)
                 if toks:
-                    paras.append((toks, p.runs[0].font.size.pt, para_width(shape, p)))
+                    paras.append((toks, p.runs[0].font.size.pt, para_width(frame, p)))
             if not paras:
                 continue
 
             def count_orphans(scale):
                 bad = total = 0
                 for toks, size, pw in paras:
-                    narrower = pw - (1 - scale) * shape.width / 12700.0
+                    narrower = pw - (1 - scale) * frame.width / 12700.0
                     b, n = orphan(toks, size, narrower, min_ratio)
                     bad += int(b)
                     total += n
@@ -422,7 +526,8 @@ def fix(prs, default_family="Inter", min_ratio=0.34, min_scale=0.84,
                 scale -= 0.02
                 bad, tot = count_orphans(scale)
                 if bad == 0 and tot <= tot0 + 1:
-                    shape.width = int(shape.width * scale)
+                    # In the shape's own coordinates, which a group scales.
+                    frame.shape.width = int(frame.shape.width * scale)
                     fixed += 1
                     break
     return fixed

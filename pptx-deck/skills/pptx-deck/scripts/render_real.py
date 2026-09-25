@@ -54,7 +54,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from fix_orphans import font_file  # noqa: E402
+from fix_orphans import font_file, text_frames  # noqa: E402
 from uno_pdf import find_python as find_uno_python  # noqa: E402
 from soffice import explain, find_soffice  # noqa: E402,F401
 
@@ -70,14 +70,13 @@ SHEET_PAD = 16     # pixels between tiles, and under each for its label
 
 
 def families(prs):
-    """Every (family, bold) named by a run in the deck, most used first."""
+    """Every (family, bold) named by a run in the deck, in groups and table cells
+    too, most used first."""
     from collections import Counter
     c = Counter()
     for slide in prs.slides:
-        for shape in slide.shapes:
-            if not shape.has_text_frame:
-                continue
-            for p in shape.text_frame.paragraphs:
+        for frame in text_frames(slide.shapes):
+            for p in frame.text_frame.paragraphs:
                 for r in p.runs:
                     if r.font.name:
                         c[(r.font.name, bool(r.font.bold))] += len(r.text)

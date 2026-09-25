@@ -32,6 +32,11 @@ really does layer boxes can say so in the file:
 
     shp.name = "allow: the arrow crosses the band on purpose"
 
+Text inside a group or a table cell gets the same checks as any other text.
+A table row is at least as tall as it is declared, and grows to fit its tallest
+cell: overflow reports each row that grows, and bounds, overlap and gaps see the
+table as drawn. A cell never overflows on its own, because its row grows instead.
+
 overflow and orphans measure with the deck's font file. A frame whose font has no
 file on this machine is not measured, and is not passed either: each missing font
 gets a WARN that counts the frames it left out, so --strict fails on it.
@@ -73,6 +78,7 @@ MIN_PT = 8.0        # nothing below this is readable from the back of a room.
 SCALE_TOL = 0.25    # points. A size this close to a step of the type scale is that step.
 MIN_LEVELS = 4      # a declared scale with fewer levels cannot keep emphasis apart from body.
 MAX_WORDS = 20      # a longer sentence is hard to say in a second language.
+GROW_TOL = 0.06     # inches of measured height past the declared height that count.
 # A single-spaced line is 1.2 x the font size in PowerPoint and in LibreOffice,
 # and a proportional line spacing multiplies that, not the bare size. LibreOffice
 # draws 12 pt at 1.0 on a 14.40 pt pitch and 7.5 pt at 1.15 on 10.35.
@@ -164,13 +170,93 @@ def warn_unmeasured(rep, check, missed):
                    ", ".join(str(n) for n in slides)))
 
 
+def measure(frame, family):
+    """(need, need_w, inner_w, measured, fonts, synthesised) for one Frame, in
+    inches: the height its text needs with the insets, the width its widest line
+    needs, the width it has, whether any paragraph was measured, the fonts with no
+    file, and the families whose bold was measured with the Regular. With a
+    paragraph left out, need is a floor: it can prove an overflow, never the
+    absence of one."""
+    tf = frame.text_frame
+    il, ir, it, ib = frame.insets
+    inner_w = (frame.width - il - ir) / EMU
+    need = (it + ib) / EMU
+    need_w = 0.0
+    measured = False
+    fonts, synthesised = set(), set()
+    paras = tf.paragraphs
+    for k, p in enumerate(paras):
+        if not p.runs or p.runs[0].font.size is None:
+            continue
+        size = p.runs[0].font.size.pt
+        toks = M.tokens(p, family)
+        if not toks:
+            continue
+        pw = M.para_width(frame, p)
+        ls = M.lines(toks, size, pw, frame.wrap)
+        if ls is None:
+            fonts |= M.missing_fonts(toks)
+            continue
+        measured = True
+        synthesised |= M.synthesised_fonts(toks)
+        need += para_height(p, size, len(ls), k == 0, k == len(paras) - 1) / 72.0
+        # The paragraph's own left margin comes out of the width too.
+        need_w = max(need_w, (max(ls) / 72.0) + (inner_w - pw / 72.0))
+    return need, need_w, inner_w, measured, fonts, synthesised
+
+
+def table_growth(cells, family):
+    """(top, declared, grown, notes) for the cell Frames of one table: its top and
+    each row's declared and drawn height, in inches, and (frame, fonts,
+    synthesised) for each cell. A row is never drawn shorter than declared, and
+    grows to its tallest cell."""
+    gf = cells[0].shape
+    declared = [row.height * cells[0].scale[1] / EMU for row in gf.table.rows]
+    need = [0.0] * len(declared)
+    merged = []
+    notes = []
+    for frame in cells:
+        h, _w, _iw, measured, fonts, synthesised = measure(frame, family)
+        notes.append((frame, fonts, synthesised))
+        if not measured:
+            continue
+        r, _c, span = frame.cell
+        if span == 1:
+            need[r] = max(need[r], h)
+        else:
+            merged.append((r, span, h))
+    grown = [n if n > d + GROW_TOL else d for n, d in zip(need, declared)]
+    # An approximation: a cell merged down several rows is held against their sum,
+    # and what it needs beyond that goes to the last of them. PowerPoint may share
+    # it out differently, but the table ends at the same place.
+    for r, span, h in merged:
+        have = sum(grown[r:r + span])
+        if h > have + GROW_TOL:
+            grown[r + span - 1] += h - have
+    return cells[0].top / EMU, declared, grown, notes
+
+
+def is_table(shape):
+    return getattr(shape, "has_table", False)
+
+
+def drawn_box(shape, family):
+    """box(), but a table ends where its grown rows end."""
+    l, t, r, b = box(shape)
+    if is_table(shape):
+        _top, declared, grown, _notes = table_growth(list(M.text_frames([shape])), family)
+        b += sum(grown) - sum(declared)
+    return l, t, r, b
+
+
 def ink_box(shape, family):
     """The box the shape actually covers. For a plain text box that is the text
-    extent, placed inside the frame according to its alignment and anchor. Falls
-    back to the geometric box when the font cannot be measured."""
+    extent, placed inside the frame according to its alignment and anchor, and for
+    a table it is the table as its rows grow. Falls back to the geometric box when
+    the font cannot be measured."""
     l, t, r, b = box(shape)
     if not is_plain_textbox(shape):
-        return l, t, r, b
+        return drawn_box(shape, family)
     tf = shape.text_frame
     if not tf.text.strip():
         return l, t, l, t
@@ -264,13 +350,13 @@ def load_tokens(path):
 
 
 # ---------------------------------------------------------------- the checks
-def check_bounds(prs, rep, ml, mr, cb):
+def check_bounds(prs, rep, ml, mr, cb, family="Inter"):
     W = prs.slide_width / EMU
     H = prs.slide_height / EMU
     for i, slide in enumerate(prs.slides):
         n = i + 1
         for shape in visible_shapes(slide):
-            l, t, r, b = box(shape)
+            l, t, r, b = drawn_box(shape, family)
             name = shape.name
             if l < -0.01 or t < -0.01 or r > W + 0.01 or b > H + 0.01:
                 rep.add("ERROR", "bounds", n,
@@ -326,50 +412,40 @@ def check_overflow(prs, rep, family):
     synthesised = {}
     for i, slide in enumerate(prs.slides):
         n = i + 1
-        for shape in visible_shapes(slide):
-            if not shape.has_text_frame or shape.shape_type == TABLE:
+        tables = {}
+        for frame in M.text_frames(visible_shapes(slide)):
+            if frame.kind == "cell":
+                tables.setdefault(frame.key[0], []).append(frame)
                 continue
-            tf = shape.text_frame
-            wrap = M.wraps(shape)
-            inset = ((tf.margin_left or 0) + (tf.margin_right or 0)) / EMU
-            inner_w = (shape.width or 0) / EMU - inset
-            need = ((tf.margin_top or 0) + (tf.margin_bottom or 0)) / EMU
-            need_w = 0.0
-            measured = False
-            fonts = set()
-            paras = tf.paragraphs
-            for k, p in enumerate(paras):
-                if not p.runs or p.runs[0].font.size is None:
-                    continue
-                size = p.runs[0].font.size.pt
-                toks = M.tokens(p, family)
-                if not toks:
-                    continue
-                pw = M.para_width(shape, p)
-                ls = M.lines(toks, size, pw, wrap)
-                if ls is None:
-                    fonts |= M.missing_fonts(toks)
-                    continue
-                measured = True
-                for face in M.synthesised_fonts(toks):
-                    synthesised.setdefault(face, set()).add((n, shape.shape_id))
-                need += para_height(p, size, len(ls), k == 0, k == len(paras) - 1) / 72.0
-                # The paragraph's own left margin comes out of the width too.
-                need_w = max(need_w, (max(ls) / 72.0) + (inner_w - pw / 72.0))
-            have = (shape.height or 0) / EMU
-            # With a paragraph left out, need is a floor: it can prove an
-            # overflow, never the absence of one.
-            wide = measured and not wrap and need_w > inner_w + EPS
-            tall = measured and need > have + 0.06
+            need, need_w, inner_w, measured, fonts, synth = measure(frame, family)
+            for face in synth:
+                synthesised.setdefault(face, set()).add((n, frame.key))
+            have = frame.height / EMU
+            wide = measured and not frame.wrap and need_w > inner_w + EPS
+            tall = measured and need > have + GROW_TOL
             if wide:
                 rep.add("ERROR", "overflow", n,
-                        "%s needs %.2f in of width and has %.2f" % (shape.name, need_w, inner_w))
+                        "%s needs %.2f in of width and has %.2f" % (frame.name, need_w, inner_w))
             if tall:
                 rep.add("ERROR", "overflow", n,
-                        "%s needs %.2f in of height and has %.2f" % (shape.name, need, have))
+                        "%s needs %.2f in of height and has %.2f" % (frame.name, need, have))
             if not (wide or tall):
                 for key in fonts:
-                    missed.setdefault(key, set()).add((n, shape.shape_id))
+                    missed.setdefault(key, set()).add((n, frame.key))
+        # A cell does not overflow: its row grows, and pushes the table down.
+        for cells in tables.values():
+            top, declared, grown, notes = table_growth(cells, family)
+            for frame, fonts, synth in notes:
+                for key in fonts:
+                    missed.setdefault(key, set()).add((n, frame.key))
+                for face in synth:
+                    synthesised.setdefault(face, set()).add((n, frame.key))
+            for r, (d, g) in enumerate(zip(declared, grown)):
+                if g > d:
+                    rep.add("WARN", "overflow", n,
+                            "%s row %d grows from %.2f to %.2f in; table bottom %.2f to %.2f in"
+                            % (cells[0].shape.name, r + 1, d, g,
+                               top + sum(declared), top + sum(grown)))
     warn_unmeasured(rep, "overflow", missed)
     warn_synthesised(rep, "overflow", synthesised)
 
@@ -380,26 +456,25 @@ def check_orphans(prs, rep, family, min_ratio, fill, include_first):
                 "%s: %s" % (kind, text[:64]))
     missed = {}
     synthesised = {}
-    for n, shape, _p, toks in M.paragraphs(prs, family, not include_first):
+    for n, frame, _p, toks in M.paragraphs(prs, family, not include_first):
         for key in M.missing_fonts(toks):
-            missed.setdefault(key, set()).add((n, shape.shape_id))
+            missed.setdefault(key, set()).add((n, frame.key))
         for face in M.synthesised_fonts(toks):
-            synthesised.setdefault(face, set()).add((n, shape.shape_id))
+            synthesised.setdefault(face, set()).add((n, frame.key))
     warn_unmeasured(rep, "orphans", missed)
     warn_synthesised(rep, "orphans", synthesised)
 
 
 def sized_runs(prs):
-    """(slide, shape, pt, run) for every run that sets a size and prints something."""
+    """(slide, frame, pt, run) for every run that sets a size and prints something,
+    in groups and table cells too."""
     for i, slide in enumerate(prs.slides):
-        for shape in visible_shapes(slide):
-            if not shape.has_text_frame:
-                continue
-            for p in shape.text_frame.paragraphs:
+        for frame in M.text_frames(visible_shapes(slide)):
+            for p in frame.text_frame.paragraphs:
                 for r in p.runs:
                     if r.font.size is None or not r.text.strip():
                         continue
-                    yield i + 1, shape, round(r.font.size.pt, 2), r
+                    yield i + 1, frame, round(r.font.size.pt, 2), r
 
 
 def check_type(prs, rep, min_pt):
@@ -437,8 +512,9 @@ def check_scale(prs, rep, scale, skip_slides=(), skip_above=None):
     used = {}
     off = Counter()
     example = {}
-    for n, shape, pt, r in sized_runs(prs):
-        if n in skip_slides or (skip_above is not None and box(shape)[3] <= skip_above):
+    for n, frame, pt, r in sized_runs(prs):
+        if n in skip_slides or (skip_above is not None
+                                and (frame.top + frame.height) / EMU <= skip_above):
             continue
         used.setdefault(n, set()).add(pt)
         if all(abs(pt - s) > SCALE_TOL for s in steps):
@@ -451,13 +527,13 @@ def check_scale(prs, rep, scale, skip_slides=(), skip_above=None):
     return used
 
 
-def check_gaps(prs, rep, ml, mr, cb, budget):
+def check_gaps(prs, rep, ml, mr, cb, budget, family="Inter"):
     top_of_body = 1.10
     for i, slide in enumerate(prs.slides):
         n = i + 1
         spans = []
         for shape in visible_shapes(slide):
-            l, t, r, b = box(shape)
+            l, t, r, b = drawn_box(shape, family)
             if r < ml - 0.5 or l > mr + 0.5:
                 continue
             if b <= top_of_body or t >= cb:
@@ -529,17 +605,17 @@ def check_portable(prs, rep, family, target=None, cjk_fonts=()):
                 rep.add("WARN", "portable", n, msg)
 
         texts = []
-        for shape in visible_shapes(slide):
-            if not shape.has_text_frame or shape.shape_type == TABLE \
-                    or not shape.text_frame.text.strip():
+        for frame in M.text_frames(visible_shapes(slide)):
+            if not frame.text_frame.text.strip():
                 continue
-            texts.append(shape)
-            name = shape.name
+            if frame.kind == "shape":
+                texts.append(frame.shape)
+            name = frame.name
             for fit in ("a:normAutofit", "a:spAutoFit"):
-                if shape.text_frame._txBody.bodyPr.find(qn(fit)) is not None:
+                if frame.text_frame._txBody.bodyPr.find(qn(fit)) is not None:
                     warn("%s: %s, and each app fits text its own way. Use noAutofit"
                          % (name, fit[2:]))
-            for p in shape.text_frame.paragraphs:
+            for p in frame.text_frame.paragraphs:
                 pPr = p._p.pPr
                 if pPr is not None and pPr.find("%s/%s" % (qn("a:lnSpc"), qn("a:spcPts"))) is not None:
                     warn("%s: line spacing in points, which Google Slides cannot store" % name)
@@ -563,9 +639,9 @@ def check_portable(prs, rep, family, target=None, cjk_fonts=()):
                     if lit and len({run_fonts(r) for r in runs}) > 1:
                         warn("%s: one highlight spans runs in different fonts" % name)
                 if p.runs and p.runs[0].font.size is not None:
-                    pw = M.para_width(shape, p)
+                    pw = M.para_width(frame, p)
                     ls = M.lines(M.tokens(p, family), p.runs[0].font.size.pt, pw,
-                                 M.wraps(shape))
+                                 frame.wrap)
                     if ls and pw and max(ls) / pw > PORTABLE_FILL:
                         warn("%s: a line fills %d percent of its frame, and another app may "
                              "wrap it" % (name, round(100 * max(ls) / pw)))
@@ -590,11 +666,10 @@ def check_portable(prs, rep, family, target=None, cjk_fonts=()):
 
 def language_texts(slide):
     """[(paragraph text, in_notes)] for one slide: every paragraph of every text
-    frame, then the notes."""
+    frame, in groups and table cells too, then the notes."""
     out = []
-    for shape in slide.shapes:
-        if shape.has_text_frame:
-            out.extend((p.text, False) for p in shape.text_frame.paragraphs)
+    for frame in M.text_frames(slide.shapes):
+        out.extend((p.text, False) for p in frame.text_frame.paragraphs)
     if slide.has_notes_slide:
         out.extend((p.text, True)
                    for p in slide.notes_slide.notes_text_frame.paragraphs)
@@ -682,7 +757,7 @@ def main():
 
     rep = Report()
     if run("bounds"):
-        check_bounds(prs, rep, ml, mr, cb)
+        check_bounds(prs, rep, ml, mr, cb, a.font)
     if run("overlap"):
         check_overlap(prs, rep, a.eps, a.font)
     if run("overflow"):
@@ -696,7 +771,7 @@ def main():
         used = check_scale(prs, rep, T.TYPE_SCALE, getattr(T, "SCALE_SKIP_SLIDES", ()),
                            getattr(T, "SCALE_SKIP_ABOVE", None))
     if run("gaps"):
-        check_gaps(prs, rep, ml, mr, cb, a.gap_budget)
+        check_gaps(prs, rep, ml, mr, cb, a.gap_budget, a.font)
     if run("language"):
         check_language(prs, rep)
         if a.lang_check:
