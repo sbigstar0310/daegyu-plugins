@@ -22,6 +22,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+from soffice import explain, find_soffice  # noqa: E402
 
 BREW = shutil.which("brew") is not None
 APT = shutil.which("apt-get") is not None
@@ -67,14 +68,6 @@ SKILL_PLUGINS = [
     ("codex", "openai-codex", "openai/codex-plugin-cc",
      "hand a slide to a second model for a redesign or an adversarial check"),
 ]
-
-
-def find_soffice():
-    for p in ("/Applications/LibreOffice.app/Contents/MacOS/soffice",
-              "/usr/bin/soffice", "/usr/local/bin/soffice", "/snap/bin/libreoffice"):
-        if os.path.exists(p):
-            return p
-    return shutil.which("soffice") or shutil.which("libreoffice")
 
 
 def plugin_installed(name):
@@ -179,8 +172,11 @@ def main():
                      pkg, why, pip_cmd(pkg)))
 
     soffice = find_soffice()
+    # A found soffice is shown, so the user sees which of several builds renders.
+    notes = {"libreoffice": soffice} if soffice else {}
     rows.append((soffice is not None, True, "libreoffice", "render the deck the way a projector will, which is the only way to see real line breaks",
-                 app_cmd("brew install --cask libreoffice", "sudo apt-get install -y libreoffice")))
+                 app_cmd("brew install --cask libreoffice", "sudo apt-get install -y libreoffice")
+                 if soffice else (explain() or "").rstrip().replace("\n", "\n    ")))
     if soffice:
         from uno_pdf import find_python
         rows.append((find_python(soffice) is not None, False, "libreoffice uno",
@@ -240,7 +236,8 @@ def main():
 
     print("pptx-deck preflight\n")
     for ok, required, what, _why, _fix in rows:
-        print("  %s  %-28s %s" % ("ok  " if ok else "MISS", what, "" if required else "(optional)"))
+        print("  %s  %-28s %s" % ("ok  " if ok else "MISS", what,
+                                   notes.get(what, "" if required else "(optional)")))
 
     if missing_required or missing_optional:
         print("")

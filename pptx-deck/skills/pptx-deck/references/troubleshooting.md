@@ -37,6 +37,13 @@ LibreOffice 7.4 or newer, and Ubuntu 22.04 and Debian 11 ship older ones. On tho
 `render_real.py` warns that the hidden slides were left out and falls back to the
 map.
 
+**Which LibreOffice renders is printed, and you can choose it.** `render_real.py`
+prints the `soffice` it used, and `preflight.py` shows it. The search takes
+`$PPTX_DECK_SOFFICE` or `$SOFFICE` first, then PATH, then the usual install
+locations, then `/opt/libreoffice*` and `~/.local/opt/libreoffice*`, newest
+version first. On a machine where an old distro `/usr/bin/soffice` is too old
+for hidden slides, put a newer one first on PATH or name it in the variable.
+
 **A render older than the deck is not evidence.** Check mtimes before reporting.
 A stale PNG showing a title that no longer exists has been reviewed as current.
 
