@@ -15,9 +15,9 @@ import sys
 
 import pymupdf
 import pytest
-from PIL import Image
+from PIL import Image, ImageChops
 from pptx import Presentation
-from pptx.util import Inches
+from pptx.util import Inches, Pt
 
 import render_real as R
 
@@ -41,16 +41,12 @@ def libreoffice(monkeypatch):
     """A stand-in for soffice. It decides what is hidden the way LibreOffice does,
     not by asking render_real. honours_filter=False plays a LibreOffice older than
     7.4, which leaves hidden slides out regardless; max_pages cuts the PDF short;
-    writes=False plays a LibreOffice that fails to write and still exits 0."""
+    writes=False plays a LibreOffice that fails to write and still exits 0.
+    uno="works" or "fails" gives it a python that can import uno."""
     calls = []
-    state = {"honours_filter": True, "max_pages": None, "writes": True}
+    state = {"honours_filter": True, "max_pages": None, "writes": True, "uno": None}
 
-    def run(cmd, capture_output=False, text=False):
-        calls.append(cmd)
-        if not state["writes"]:
-            return subprocess.CompletedProcess(cmd, 0, "", "Error: source file could not be loaded")
-        target, outdir, path = cmd[3], cmd[5], cmd[6]
-        with_hidden = "ExportHiddenSlides" in target and state["honours_filter"]
+    def export(path, pdf, with_hidden):
         doc = pymupdf.open()
         for i, slide in enumerate(Presentation(path).slides):
             if slide._element.get("show") in ("0", "false") and not with_hidden:
@@ -58,10 +54,25 @@ def libreoffice(monkeypatch):
             if state["max_pages"] is not None and doc.page_count == state["max_pages"]:
                 break
             doc.new_page(width=200 + 10 * (i + 1), height=100)
-        doc.save(os.path.join(outdir, os.path.splitext(os.path.basename(path))[0] + ".pdf"))
+        doc.save(pdf)
+
+    def run(cmd, capture_output=False, text=False, timeout=None):
+        calls.append(cmd)
+        if cmd[0] == "unopython":
+            if state["uno"] != "works":
+                return subprocess.CompletedProcess(
+                    cmd, 1, "", "Traceback\nRuntimeError: LibreOffice did not answer\n")
+            export(cmd[3], cmd[4], "--hidden" in cmd)
+            return subprocess.CompletedProcess(cmd, 0, "autospace off in 5 paragraphs", "")
+        if not state["writes"]:
+            return subprocess.CompletedProcess(cmd, 0, "", "Error: source file could not be loaded")
+        target, outdir, path = cmd[3], cmd[5], cmd[6]
+        export(path, os.path.join(outdir, os.path.splitext(os.path.basename(path))[0] + ".pdf"),
+               "ExportHiddenSlides" in target and state["honours_filter"])
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(R, "find_soffice", lambda: "soffice")
+    monkeypatch.setattr(R, "find_uno_python", lambda soffice: "unopython" if state["uno"] else None)
     monkeypatch.setattr(R.subprocess, "run", run)
 
     def configure(**kw):
@@ -182,6 +193,63 @@ def test_a_deck_without_hidden_slides(tmp_path, libreoffice, render):
     assert "no hidden slides, so page N is slide N" in out
 
 
+def test_pdf_out_keeps_the_checked_pdf_with_its_hidden_slides(tmp_path, libreoffice, render):
+    libreoffice()
+    dest = tmp_path / "docs" / "deck.pdf"
+    code, out, _err, _pngs = render(deck(tmp_path / "d.pptx"), "--pdf-out", str(dest))
+    assert code == 0
+    assert [p.rect.width for p in pymupdf.open(str(dest))] == [slide_width(n) for n in range(1, 6)]
+    assert not (tmp_path / "render" / "d.pdf").exists()
+    assert "pdf     %s" % dest in out
+
+
+def test_the_contact_sheet_tiles_each_written_slide_at_120_dpi(tmp_path, libreoffice, render):
+    libreoffice()
+    code, out, _err, pngs = render(deck(tmp_path / "d.pptx"), "--skip-hidden", "--contact-sheet")
+    assert code == 0
+    assert "contact.png" in pngs
+    assert "sheet   contact.png, 3 slides at 120 dpi" in out
+    sheet = Image.open(str(tmp_path / "render" / "contact.png")).convert("RGB")
+    pad = R.SHEET_PAD
+    # Slides 1, 3 and 4 in one row, in cells as wide as the widest: slide 4 at
+    # 240 pt x 120 / 72 = 400 px. A tile's right edge says which slide it is.
+    for k, n in enumerate((1, 3, 4)):
+        x = pad + k * (400 + pad)
+        right = x + slide_width(n) * 120 // 72
+        assert sheet.getpixel((right - 1, pad)) == (255, 255, 255)
+        assert sheet.getpixel((right + 1, pad)) != (255, 255, 255)
+        # 100 pt tall is 167 px. Below it, the slide number is drawn in black.
+        label = sheet.crop((x, pad + 167, x + 400, pad + 167 + 2 * pad)).convert("L")
+        assert label.getextrema()[0] < 64
+
+
+@pytest.mark.parametrize("flags, hidden_flag", [
+    pytest.param((), True, id="rendered"),
+    pytest.param(("--skip-hidden",), False, id="skipped"),
+])
+def test_uno_is_the_route_when_a_python_can_import_it(tmp_path, libreoffice, render,
+                                                       flags, hidden_flag):
+    calls = libreoffice(uno="works")
+    code, out, err, pngs = render(deck(tmp_path / "d.pptx"), *flags)
+    assert code == 0
+    assert len(calls) == 1 and calls[0][0] == "unopython"
+    assert ("--hidden" in calls[0]) == hidden_flag
+    assert "export  uno, autospace off" in out
+    assert len(pngs) == (5 if hidden_flag else 3)
+    assert err == ""
+
+
+def test_a_failed_uno_export_falls_back_to_the_command_line(tmp_path, libreoffice, render):
+    calls = libreoffice(uno="fails")
+    code, out, err, pngs = render(deck(tmp_path / "d.pptx"))
+    assert code == 0
+    assert [c[0] for c in calls] == ["unopython", "soffice"]
+    assert calls[1][3] == R.PDF_WITH_HIDDEN
+    assert "WARNING: the uno export wrote no PDF (RuntimeError: LibreOffice did not answer)" in err
+    assert "export  command line, autospace on" in out
+    assert len(pngs) == 5
+
+
 # ---------------------------------------------------------------- the font gate
 def font_deck(path, runs):
     """One slide with one run per (family, bold)."""
@@ -229,14 +297,24 @@ def test_a_bold_only_family_with_no_file_at_all_stops_the_render(tmp_path, fonts
 
 
 # ---------------------------------------------------------------- real LibreOffice
+def real_route(monkeypatch, route):
+    if route == "command line":
+        monkeypatch.setattr(R, "find_uno_python", lambda soffice: None)
+    elif R.find_uno_python(R.find_soffice()) is None:
+        pytest.skip("no python here can import uno")
+
+
 @pytest.mark.libreoffice
 @pytest.mark.skipif(R.find_soffice() is None, reason="LibreOffice is not installed")
+@pytest.mark.parametrize("route", ["uno", "command line"])
 @pytest.mark.parametrize("flags, pages", [
     pytest.param((), ["SLIDE 1", "SLIDE 2 HIDDEN", "SLIDE 3", "SLIDE 4", "SLIDE 5 HIDDEN"],
                  id="rendered"),
     pytest.param(("--skip-hidden",), ["SLIDE 1", "SLIDE 3", "SLIDE 4"], id="skipped"),
 ])
-def test_libreoffice_exports_what_the_flag_says(tmp_path, render, flags, pages):
+def test_libreoffice_exports_what_the_flag_says(tmp_path, render, monkeypatch, route, flags,
+                                                pages):
+    real_route(monkeypatch, route)
     if "--skip-hidden" not in flags:
         version = subprocess.run([R.find_soffice(), "--version"],
                                  capture_output=True, text=True).stdout
@@ -249,3 +327,33 @@ def test_libreoffice_exports_what_the_flag_says(tmp_path, render, flags, pages):
     doc = pymupdf.open(str(tmp_path / "render" / "d.pdf"))
     assert [page.get_text().strip() for page in doc] == pages
     assert len(pngs) == len(pages)
+
+
+@pytest.mark.libreoffice
+@pytest.mark.skipif(R.find_soffice() is None, reason="LibreOffice is not installed")
+def test_uno_closes_the_hangul_latin_gap_and_changes_nothing_else(tmp_path, render, monkeypatch):
+    real_route(monkeypatch, "uno")
+    prs = Presentation()
+    for text in ("Latin only, the same either way", "\ud55c\uad6d\uc5b4Latin\ud55c\uad6d\uc5b4Latin"):
+        tb = prs.slides.add_slide(prs.slide_layouts[6]).shapes.add_textbox(
+            Inches(0.5), Inches(1), Inches(9), Inches(1))
+        r = tb.text_frame.paragraphs[0].add_run()
+        r.text, r.font.size = text, Pt(28)
+    path = str(tmp_path / "d.pptx")
+    prs.save(path)
+
+    def ink(name):
+        im = Image.open(str(tmp_path / "render" / name)).convert("L")
+        return im.copy(), im.point(lambda v: 255 if v < 128 else 0).getbbox()
+
+    _code, out, _err, _pngs = render(path)
+    assert "export  uno, autospace off" in out
+    (latin_uno, _), (_, mixed_uno) = ink("s01.png"), ink("s02.png")
+    monkeypatch.setattr(R, "find_uno_python", lambda soffice: None)
+    _code, out, _err, _pngs = render(path)
+    assert "export  command line, autospace on" in out
+    (latin_cli, _), (_, mixed_cli) = ink("s01.png"), ink("s02.png")
+    assert ImageChops.difference(latin_uno, latin_cli).getbbox() is None
+    # Three Hangul/Latin boundaries, each about 6.7 pt, so 6.7 px at 72 dpi, wider
+    # on the command line.
+    assert mixed_cli[2] - mixed_uno[2] >= 3 * 6
