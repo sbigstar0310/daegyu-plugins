@@ -340,6 +340,34 @@ def test_an_unset_word_wrap_wraps(fonts):
     assert M.report(prs) == [(2, ORPHANED, "orphan")]
 
 
+
+def test_a_one_slide_preview_is_checked_for_orphans_although_it_is_slide_1(fonts, tmp_path,
+                                                                          monkeypatch, capsys):
+    # build_deck.py --only writes one slide. It is not the title, so the slide-1
+    # skip that spares a title must not spare it.
+    fonts("Inter-hash.ttf", "Inter", "Regular")
+
+    def run(prs):
+        path = str(tmp_path / "deck.pptx")
+        prs.save(path)
+        monkeypatch.setattr(sys, "argv", ["check_layout.py", path, "--margins", "0.17,9.83,5.31",
+                                          "--only", "orphans"])
+        return C.main(), capsys.readouterr().out
+
+    prs = deck()
+    text_box(prs, 0.60, [ORPHANED])
+    code, out = run(prs)
+    assert code == 1
+    assert "preview  one slide" in out
+    assert "ERROR orphans   slide 1   orphan: " in out
+
+    prs = deck()
+    text_box(prs, 0.60, [ORPHANED])
+    text_box(prs, 0.40, ["title"])
+    code, out = run(prs)
+    assert code == 0
+    assert "preview" not in out
+
 # ---------------------------------------------------------------- no-wrap frames
 # 44 characters fill 264 pt of the 273.6 pt line, 96 percent. ORPHANED adds " LINK"
 # and is 294 pt, 4.08 in: wrapped, "LINK" drops to a 24 pt last line; unwrapped, it

@@ -197,13 +197,40 @@ builder. Do not spend long looking.
 
 ---
 
-## 2. Build: one builder, one tokens file, shared helpers
+## 2. Build: one file per slide, one tokens file, shared helpers
+
+```
+<deckdir>/
+  tokens.py            numbers only                        deck-global
+  deck_lib.py          copied from scripts/                deck-global
+  helpers.py           header, takeaway, ... on deck_lib   deck-global
+  build_deck.py        SLIDES order, HIDDEN, page numbers  deck-global
+  slides/s03_method.py def build(s), NOTES                 one per slide
+```
 
 ```
 cp scripts/deck_lib.py <deckdir>/
-# write build() in <deckdir>/build_deck.py, importing tokens and deck_lib
-python3 <deckdir>/build_deck.py
+python3 <deckdir>/build_deck.py -o deck.pptx                              # the deck
+python3 <deckdir>/build_deck.py --only s03_method -o preview/s03.pptx     # one slide
 ```
+
+`assets/starter/` is this layout worked through for three slides. Copy its
+`build_deck.py`, point its default output at `deck.pptx`, give your `helpers.py`
+the `slide`, `page_number`, `notes` and `T` it calls, and keep its contract:
+
+- **A slide module only draws its slide.** `build(s)` gets a blank slide, and the
+  module holds the slide's `NOTES`, plus `NUMBERED = False` for a slide that
+  carries no page number. It never adds, reorders or hides a slide, never draws a
+  page number, and never reads another slide's module.
+- **`build_deck.py` only assembles.** It holds `SLIDES`, the ordered module names,
+  and `HIDDEN`, then calls each `build(s)` and adds the notes, the page numbers and
+  the hidden flags. Numbers count visible, numbered slides, so they follow the
+  order list and never live in a slide file.
+- **`--only` builds one slide into its own pptx** with the page number and hidden
+  flag it has in the deck. It never writes `deck.pptx`.
+- **Name a file by number and topic**, `s03_method.py`, and keep the name when the
+  slide moves: the order lives in `SLIDES`, not in the filename. Renumber files
+  only when the main session holds every slide.
 
 `scripts/deck_lib.py` holds the design-agnostic mechanics, which is to say the
 places python-pptx has no answer: inline highlight runs, hanging-indent bullets,
@@ -211,9 +238,9 @@ pictures that return the size they were actually placed at, per-side table borde
 shapes with the theme style stripped, speaker notes, hidden slides, page numbers.
 It contains no coordinates and no palette. It takes your tokens.
 
-Every layout number in `build()` comes from `tokens.py` or from an `ARCHETYPES`
-entry. A raw coordinate that is not derived from a token is a bug the next reader,
-human or agent, cannot see.
+Every layout number in a slide's `build(s)` comes from `tokens.py` or from an
+`ARCHETYPES` entry. A raw coordinate that is not derived from a token is a bug the
+next reader, human or agent, cannot see.
 
 The spec renderer in `scripts/render.py` is the alternative path for decks in the
 house line. See `scripts/SCHEMA.md` for what it can and cannot express.
@@ -474,23 +501,38 @@ supervisor attacks first. For someone else's paper, read
 
 ### The page-by-page phase is the body of the work
 
-After the first full draft, expect fifty turns of small per-slide edits. Keep one
-generator, apply the edit, rebuild, render only what changed at 200 dpi, re-check
-geometry, and report in one or two lines. Identify slides by their printed number
-and title, and update your own slide map whenever a slide moves, splits or merges,
-because the next request will use the new numbers.
+After the first full draft, expect fifty turns of small per-slide edits. Identify
+slides by their printed number and title, and map each to its file in `slides/`.
+
+**An edit to one slide is an edit to one file.** Whoever owns the slide, you or a
+delegate, edits only `slides/sNN_name.py`, then builds it alone with `--only`,
+renders the preview at 200 dpi, runs `check_layout.py` on the preview, and reports
+in one or two lines. Feedback on several slides fans out per section 9.
+
+**A change to the order or to a shared file stays in the main session.** Adding,
+moving, splitting, merging or hiding a slide edits `SLIDES` or `HIDDEN`; a new
+token or helper edits `tokens.py` or `helpers.py`. Make these yourself, between
+rounds of slide edits, never while a delegate is mid-edit.
+
+**Integrate once per round.** When every slide edit of the round is in: full build,
+`check_layout.py` on `deck.pptx`, render the changed slides from the deck itself
+(page numbers and neighbours are only right there), and update your slide map
+whenever a slide moved, split or merged, because the next request will use the new
+numbers. A preview that passed is not a deck that passed.
 
 ### When the user edits the deck by hand
 
 The generator rewrites `deck.pptx` from scratch, so a hand edit dies at the next
 build. The moment they say they are going to edit it:
 
-1. **Snapshot first, before they ask.** Copy the deck and the builder into
+1. **Snapshot first, before they ask.** Copy the deck and the whole build directory
+   (`build_deck.py`, `helpers.py`, `tokens.py`, `slides/`) into
    `backup/<timestamp>/`.
 2. **Stop building.** Say so explicitly.
 3. **On return, diff before anything else**: shapes, text, notes, hidden flags,
    highlights, current against the snapshot. Report which slides changed.
-4. **Port their changes into the builder**, then rebuild and diff the text again to
+4. **Port their changes into the slide files** they touched, and a reorder or a
+   hidden flag into `SLIDES` and `HIDDEN`, then rebuild and diff the text again to
    prove nothing else moved.
 5. Tell them what PowerPoint will not maintain: **hidden-slide flags** and **page
    numbers**, both baked rather than computed. After a manual reorder, re-derive
@@ -505,9 +547,9 @@ do not report stale content as current.
 ### Freeze
 
 When the user says the deck is final: back up, port their last hand edits into the
-builder, and **change the generator's output path** so a later run cannot overwrite
-the deck. A warning comment is not a freeze. After that, generate only derived
-artifacts.
+slide files, and **change the output path in `build_deck.py`** so a later run
+cannot overwrite the deck. A warning comment is not a freeze. After that, generate
+only derived artifacts.
 
 ---
 
@@ -517,10 +559,26 @@ artifacts.
 the request is explicit. A fan-out you chose yourself is slower and more expensive
 than the tool they named.
 
-**One writer at a time.** While a delegate holds the builder, do not edit it and do
-not start a second job against it. Queue incoming feedback, or apply it as anchored
-patches that assert their anchor matches exactly once, so a collision fails loudly
-instead of clobbering silently. Work that touches no file, such as brainstorming or
+**Parallel per-slide edits are allowed when they touch different slide files.**
+Feedback on five slides can go to five agents, one slide file each. Each brief
+names the one file the agent may write, its preview paths (`preview/sNN.pptx`,
+rendered into `preview/sNN/`, never the shared `render/`), and the check it runs
+on that preview before it reports: `--only` build, `render_real.py --dpi 200`,
+`check_layout.py`. Two edits to the same slide go to one agent, in sequence.
+
+**Shared files keep one writer, the main session.** `tokens.py`, `deck_lib.py`,
+`helpers.py`, `build_deck.py` with its `SLIDES` and `HIDDEN`, and `deck.pptx` are
+read-only to slide agents. A slide agent that needs a new token or helper says so
+and draws it locally in its slide file; you promote it to the shared file after
+the round. No slide agent writes `deck.pptx`: you integrate once, per section 8.
+
+**Small text tweaks stay in the main session.** A word, a number, a note: spawning
+an agent costs more than the edit. Fan out only slides that need real layout work.
+
+**While a delegate holds a file, do not edit it** and do not start a second job
+against it. Queue incoming feedback for that slide, or apply it as anchored patches
+that assert their anchor matches exactly once, so a collision fails loudly instead
+of clobbering silently. Work that touches no file, such as brainstorming or
 checking numbers, can run in parallel.
 
 **Every brief carries invariants, not just a style.** Name what must NOT change:
@@ -538,7 +596,9 @@ diff.
 **Verify the delegate's output yourself.** Render it for real, diff the text and
 shape inventory against the pre-delegation snapshot, and read the code it wrote.
 Delegates have greyscaled every embedded image, emitted the same figure on three
-consecutive slides, and reported success having changed nothing.
+consecutive slides, and reported success having changed nothing. After a fan-out,
+`git diff --stat` or the file mtimes confirm each slide agent wrote only its own
+slide file.
 
 **A geometry claim without coordinates is not evidence.** The delegate's sandbox
 may have no renderer. Require it to say so.
@@ -587,7 +647,8 @@ without them, pass `--skip-hidden --pdf-out`.
 - `references/troubleshooting.md`, tool traps that each cost real time.
 - `references/instance-white-ref.md`, the bundled white default.
 - `references/evidence-rules.md`, what a number on a slide has to satisfy.
-- `assets/tokens_white.py` and `assets/starter_build.py`, the default instance.
+- `assets/tokens_white.py` and `assets/starter/`, the default instance and the
+  one-file-per-slide layout.
 - `assets/icons/`, `assets/logos/`, `assets/index/`, bundled art and search indexes.
 - `scripts/preflight.py`, `extract_ref.py`, `deck_lib.py`, `render_real.py`,
   `uno_pdf.py`, `check_layout.py`, `fix_orphans.py`, `paper_assets.py`, `icons.py`.

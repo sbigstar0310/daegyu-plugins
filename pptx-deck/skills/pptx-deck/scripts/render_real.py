@@ -48,9 +48,11 @@ off; otherwise it is the plain command line export. The route that ran is printe
 import argparse
 import glob
 import os
+import pathlib
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -215,8 +217,16 @@ def main():
                              "export runs.\n" % (err.strip().splitlines() or ["no message"])[-1])
     if not os.path.exists(pdf):
         target = "pdf" if a.skip_hidden else PDF_WITH_HIDDEN
-        r = subprocess.run([soffice, "--headless", "--convert-to", target, "--outdir", out, deck],
-                           capture_output=True, text=True)
+        # A throwaway profile, as uno_pdf.py uses: two exports on one profile hand
+        # the second to the first, which can exit 0 having written nothing. Slide
+        # agents render their previews at the same time.
+        profile = tempfile.mkdtemp(prefix="render-real-")
+        try:
+            r = subprocess.run([soffice, "-env:UserInstallation=" + pathlib.Path(profile).as_uri(),
+                                "--headless", "--convert-to", target, "--outdir", out, deck],
+                               capture_output=True, text=True)
+        finally:
+            shutil.rmtree(profile, ignore_errors=True)
     if not os.path.exists(pdf):
         sys.stderr.write("LibreOffice produced no PDF.\n%s\n%s\n" % (r.stdout, r.stderr))
         sys.stderr.write("If PowerPoint has the deck open, a ~$ lock file is in the way.\n")

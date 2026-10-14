@@ -66,7 +66,10 @@ def libreoffice(monkeypatch):
             return subprocess.CompletedProcess(cmd, 0, "autospace off in 5 paragraphs", "")
         if not state["writes"]:
             return subprocess.CompletedProcess(cmd, 0, "", "Error: source file could not be loaded")
-        target, outdir, path = cmd[3], cmd[5], cmd[6]
+        assert cmd[1].startswith("-env:UserInstallation=file://")
+        assert os.path.isdir(cmd[1].split("file://", 1)[1])
+        target = cmd[cmd.index("--convert-to") + 1]
+        outdir, path = cmd[cmd.index("--outdir") + 1], cmd[-1]
         export(path, os.path.join(outdir, os.path.splitext(os.path.basename(path))[0] + ".pdf"),
                "ExportHiddenSlides" in target and state["honours_filter"])
         return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -119,7 +122,7 @@ def test_hidden_slides_are_rendered_by_default(tmp_path, libreoffice, render):
     calls = libreoffice()
     code, out, err, pngs = render(deck(tmp_path / "d.pptx"))
     assert code == 0
-    assert calls[0][3] == R.PDF_WITH_HIDDEN
+    assert calls[0][calls[0].index("--convert-to") + 1] == R.PDF_WITH_HIDDEN
     assert pngs == {"s%02d.png" % n: slide_width(n) for n in range(1, 6)}
     assert "hidden  2, 5, rendered like the rest, so page N is slide N." in out
     assert err == ""
@@ -129,7 +132,7 @@ def test_skip_hidden_renders_what_the_slideshow_shows(tmp_path, libreoffice, ren
     calls = libreoffice()
     code, out, err, pngs = render(deck(tmp_path / "d.pptx"), "--skip-hidden")
     assert code == 0
-    assert calls[0][3] == "pdf"
+    assert calls[0][calls[0].index("--convert-to") + 1] == "pdf"
     assert pngs == {"s%02d.png" % n: slide_width(n) for n in (1, 3, 4)}
     assert "slide to page map" in out
     assert "1>1  2>hidden  3>2  4>3  5>hidden" in out
@@ -244,7 +247,7 @@ def test_a_failed_uno_export_falls_back_to_the_command_line(tmp_path, libreoffic
     code, out, err, pngs = render(deck(tmp_path / "d.pptx"))
     assert code == 0
     assert [c[0] for c in calls] == ["unopython", "soffice"]
-    assert calls[1][3] == R.PDF_WITH_HIDDEN
+    assert calls[1][calls[1].index("--convert-to") + 1] == R.PDF_WITH_HIDDEN
     assert "WARNING: the uno export wrote no PDF (RuntimeError: LibreOffice did not answer)" in err
     assert "export  command line, autospace on" in out
     assert len(pngs) == 5
