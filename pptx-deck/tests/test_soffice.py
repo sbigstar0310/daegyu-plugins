@@ -225,7 +225,7 @@ def test_render_real_prints_the_soffice_it_used(tmp_path, monkeypatch, capsys):
         doc.new_page(width=200, height=100)
         for _ in range(4):
             doc.new_page(width=200, height=100)
-        doc.save(os.path.join(cmd[5], "d.pdf"))
+        doc.save(os.path.join(cmd[cmd.index("--outdir") + 1], "d.pdf"))
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(R, "find_soffice", lambda: "/opt/lo/program/soffice")

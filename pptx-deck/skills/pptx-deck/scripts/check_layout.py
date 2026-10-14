@@ -55,6 +55,10 @@ it, a highlight across fonts, a filled shape over some lines of a text frame
 style word after its name allowed. An ea font from google-fonts-korean.txt carries
 Hangul: Google Slides draws such a run correctly.
 
+A deck of one slide is a preview, the output of build_deck.py --only: orphans
+checks it although it is slide 1, and SCALE_SKIP_SLIDES does not apply, because
+its slide 1 is not the deck's slide 1. The full build is checked as usual.
+
 --lang-check adds the prose check, for a presenter speaking a second language: the
 longest sentence on each slide, and in its notes, if it has more than --max-words
 words (20 by default). Each paragraph, and so each bullet, ends a sentence, and so
@@ -724,7 +728,8 @@ def main():
     ap.add_argument("--min-pt", type=float, default=MIN_PT)
     ap.add_argument("--min-ratio", type=float, default=0.34)
     ap.add_argument("--fill-risk", type=float, default=M.AT_RISK_FILL)
-    ap.add_argument("--include-first", action="store_true")
+    ap.add_argument("--include-first", action="store_true",
+                    help="check slide 1 for orphans too; on by itself for a one-slide preview")
     ap.add_argument("--lang-check", action="store_true",
                     help="also report the longest sentence on each slide and in its notes")
     ap.add_argument("--max-words", type=int, default=MAX_WORDS,
@@ -751,6 +756,7 @@ def main():
         source = "inferred from the deck"
 
     only = {x.strip() for x in a.only.split(",")} if a.only else None
+    preview = len(prs.slides) == 1
 
     def run(name):
         return only is None or name in only
@@ -763,12 +769,13 @@ def main():
     if run("overflow"):
         check_overflow(prs, rep, a.font)
     if run("orphans"):
-        check_orphans(prs, rep, a.font, a.min_ratio, a.fill_risk, a.include_first)
+        check_orphans(prs, rep, a.font, a.min_ratio, a.fill_risk, a.include_first or preview)
     sizes = check_type(prs, rep, a.min_pt) if run("type") else Counter()
     steps = scale_steps(T.TYPE_SCALE) if getattr(T, "TYPE_SCALE", None) else None
     used = {}
     if steps and run("scale"):
-        used = check_scale(prs, rep, T.TYPE_SCALE, getattr(T, "SCALE_SKIP_SLIDES", ()),
+        skip = () if preview else getattr(T, "SCALE_SKIP_SLIDES", ())
+        used = check_scale(prs, rep, T.TYPE_SCALE, skip,
                            getattr(T, "SCALE_SKIP_ABOVE", None))
     if run("gaps"):
         check_gaps(prs, rep, ml, mr, cb, a.gap_budget, a.font)
@@ -785,6 +792,8 @@ def main():
           % (os.path.basename(a.deck), len(prs.slides),
              prs.slide_width / EMU, prs.slide_height / EMU))
     print("margins  %.2f to %.2f, content bottom %.2f  (%s)" % (ml, mr, cb, source))
+    if preview:
+        print("preview  one slide: checked as a preview, no slide-1 skips")
     if portable:
         print("portable checked for %s" % (target or "any app"))
     if sizes:

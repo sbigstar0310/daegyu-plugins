@@ -1,8 +1,8 @@
 # Instance: the white reference
 
 The bundled default when the user has no reference deck of their own. Tokens live
-in `assets/tokens_white.py`; `assets/starter_build.py` is a worked three-slide deck
-against them.
+in `assets/tokens_white.py`; `assets/starter/build_deck.py` is a worked
+three-slide deck against them, one file per slide.
 
 It was extracted from a real reference that a presenter chose for a graduate talk,
 and then hardened across about a hundred rounds of page-by-page feedback.

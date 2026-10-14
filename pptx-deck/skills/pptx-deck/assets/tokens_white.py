@@ -3,7 +3,7 @@
 
 This file holds numbers, not behaviour. Import it, or copy it next to your builder
 and edit the values. Nothing here knows what a slide looks like: that is the job of
-your build() and of starter_build.py.
+your build() and of assets/starter/.
 
 If the user brought their own reference deck, do not use this file. Run
 `python3 scripts/extract_ref.py <ref.pptx>` and let it write a tokens.py of the

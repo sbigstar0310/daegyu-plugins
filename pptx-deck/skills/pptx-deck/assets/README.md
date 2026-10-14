@@ -39,9 +39,14 @@ Both are snapshots. `python3 scripts/icons.py refresh-index` pulls current ones.
 
       curl -s https://fonts.google.com/metadata/fonts | python3 -c 'import json, sys; t = sys.stdin.read(); print("\n".join(sorted({f["family"] for f in json.loads(t[t.index("{"):])["familyMetadataList"] if "korean" in f["subsets"]})))' > assets/index/google-fonts-korean.txt
 
-## tokens_white.py and starter_build.py
+## tokens_white.py and starter/
 
 The default instance: a white deck at 10 x 5.625 in with Inter, described in
-`references/instance-white-ref.md`. `starter_build.py` builds a three slide deck
-from those tokens and is the fastest way to check that python-pptx, the font and
-the renderer all work before you build anything real.
+`references/instance-white-ref.md`. `starter/build_deck.py` builds a three slide
+deck from those tokens and is the fastest way to check that python-pptx, the font
+and the renderer all work before you build anything real.
+
+`starter/` is also the layout a real deck copies: `build_deck.py` holds the slide
+order and adds page numbers and hidden flags, `helpers.py` the shared helpers, and
+`slides/sNN_name.py` one slide each, with `build(s)` and its `NOTES`.
+`build_deck.py --only s03_weight -o preview/s03.pptx` builds one slide alone.

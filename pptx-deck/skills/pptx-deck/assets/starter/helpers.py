@@ -1,38 +1,30 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""A three slide deck in the white reference instance.
+"""The shared helpers of the starter deck: mechanics and house grammar.
 
-Run this first, before you build anything real:
+Every slide module imports this. It is deck-global, so only the main session
+edits it. A slide agent reads it and never changes it: a helper one slide needs
+differently is drawn in that slide's own file.
 
-    python3 assets/starter_build.py out.pptx
-    python3 scripts/render_real.py out.pptx
-    python3 scripts/check_layout.py out.pptx
-
-If all three pass, python-pptx, the font and the renderer work, and you know what
-the house grammar looks like. If one fails, fix that before writing a real deck.
-
-This file is deliberately self contained: it imports tokens and python-pptx and
-nothing else, so you can copy it anywhere. For a real deck use
-`scripts/deck_lib.py` instead of the helpers below, which is the same mechanics
-with the edge cases handled.
+It is deliberately self contained: it imports tokens and python-pptx and nothing
+else. For a real deck use `scripts/deck_lib.py` instead of the mechanics below,
+which is the same with the edge cases handled, and keep only the grammar
+(header, takeaway, caption) in a file like this one.
 """
 import os
 import sys
 
-from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.oxml.ns import qn
 from lxml import etree
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import tokens_white as T
-
 HERE = os.path.dirname(os.path.abspath(__file__))
-ICONS = os.path.join(HERE, "icons")
+ASSETS = os.path.dirname(HERE)
+sys.path.insert(0, ASSETS)
+import tokens_white as T  # noqa: E402
 
-PAGE = [0]
+ICONS = os.path.join(ASSETS, "icons")
 
 
 # ---------------------------------------------------------------- mechanics
@@ -137,15 +129,16 @@ def slide(prs):
     return prs.slides.add_slide(prs.slide_layouts[6])
 
 
-def header(s, title, section=None, number=True):
-    """Small grey section label, slide title, page number. Fixed on every slide."""
+def header(s, title, section=None):
+    """Small grey section label and slide title. The page number is not drawn
+    here: it depends on the slide order, so build_deck.py adds it."""
     if section:
         t1(s, T.ML, T.LABEL_Y, T.CW, 0.2, section, size=T.S_SMALL)
     t1(s, T.ML, T.TITLE_Y, T.CW, 0.44, title, size=T.S_TITLE, bold=True)
-    if number:
-        PAGE[0] += 1
-        t1(s, T.PAGE_X, T.PAGE_Y, T.PAGE_W, 0.18, str(PAGE[0]),
-           size=T.S_SMALL, align=PP_ALIGN.RIGHT)
+
+
+def page_number(s, n):
+    t1(s, T.PAGE_X, T.PAGE_Y, T.PAGE_W, 0.18, str(n), size=T.S_SMALL, align=PP_ALIGN.RIGHT)
 
 
 def takeaway(s, text, phrase=None, y=4.76):
@@ -160,68 +153,3 @@ def takeaway(s, text, phrase=None, y=4.76):
 
 def caption(s, x, y, w, text):
     return tb(s, x, y, w, 0.22, [dict(t=text, size=T.S_SMALL, after=0, line=1.0)])
-
-
-# ---------------------------------------------------------------- the deck
-def build(prs):
-    # 1. Title. No section label, no page number.
-    s = slide(prs)
-    t1(s, T.ML, 2.10, T.CW, 0.90, "The white reference instance", size=T.S_SEC, bold=True)
-    t1(s, T.ML, 3.10, 6.20, 0.60,
-       "A starter deck that proves the toolchain works", size=T.S_BODY)
-    rect(s, T.ML, 3.95, T.CW, 0.01, fill=T.GRAY)
-    t1(s, T.ML, 4.15, T.CW, 0.24, "pptx-deck", size=T.S_SMALL)
-    notes(s, "Three slides. If these render and pass the layout check, "
-             "the toolchain is working and you can build the real deck.")
-
-    # 2. Bullets plus icons. Two blocks, so it is inside the density budget.
-    s = slide(prs)
-    header(s, "Every slide carries a picture", section="Grammar")
-    bullets(s, T.ML, 1.50, 5.40, 2.40, [
-        ("Header", "a grey label above a bold title, on every slide"),
-        ("Body", "at most three blocks, and one of them is a picture"),
-        ("Takeaway", "one closing line, one phrase on the marker"),
-    ], after=16)
-    for i, name in enumerate(["workflow", "shield-check", "gauge"]):
-        path = os.path.join(ICONS, name + ".png")
-        if os.path.exists(path):
-            pic(s, path, 6.55, 1.55 + i * 1.05, w=0.46)
-            t1(s, 7.20, 1.60 + i * 1.05, 2.10, 0.30, name, size=T.S_DESC)
-    takeaway(s, "A slide with no picture is a slide the audience reads instead of listens to.",
-             phrase="reads instead of listens")
-    notes(s, "The icons come from assets/icons. They are already ink black at "
-             "stroke width 1.6, so they sit at the same weight as the body text.")
-
-    # 3. A card row. Still two blocks: the cards and the takeaway.
-    s = slide(prs)
-    header(s, "Weight, size, and one marker", section="Grammar")
-    cards = [("eye-off", "No accent", "One ink on white. Hierarchy is size and weight."),
-             ("scale", "One grey", "#CFCFCF for rules, hairlines and card outlines."),
-             ("flag", "One marker", "#E6E6E6 behind a single bold phrase per slide.")]
-    cw = (T.CW - 2 * 0.24) / 3
-    for i, (icon, head, body) in enumerate(cards):
-        x = T.ML + i * (cw + 0.24)
-        rect(s, x, 1.60, cw, 2.02, fill=None, line=T.GRAY)
-        path = os.path.join(ICONS, icon + ".png")
-        if os.path.exists(path):
-            pic(s, path, x + 0.22, 1.82, w=0.40)
-        t1(s, x + 0.22, 2.40, cw - 0.44, 0.30, head, size=T.S_BODY, bold=True)
-        tb(s, x + 0.22, 2.78, cw - 0.44, 0.70, [dict(t=body, size=T.S_DESC, after=0)])
-    takeaway(s, "If you reach for a colour, the answer this instance wants is weight.",
-             phrase="the answer this instance wants is weight")
-    notes(s, "Cards are outlined in the one grey, never filled with colour and "
-             "never rounded. Each one still carries an icon.")
-
-
-def main():
-    out = sys.argv[1] if len(sys.argv) > 1 else "starter.pptx"
-    prs = Presentation()
-    prs.slide_width = Inches(T.W)
-    prs.slide_height = Inches(T.H)
-    build(prs)
-    prs.save(out)
-    print("wrote %s, %d slides" % (out, len(prs.slides)))
-
-
-if __name__ == "__main__":
-    main()
