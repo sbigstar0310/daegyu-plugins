@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "daegyu-plugins",
-  "description": "Personal Claude Code plugins by sbigstar0310 (notion-manager, progress, pptx-deck, mobile-qa, work-style)",
+  "description": "Personal Claude Code plugins by sbigstar0310 (notion-manager, progress, pptx-deck, mobile-qa, work-style, lecture-capture)",
   "owner": {
     "name": "sbigstar0310"
   },
@@ -50,6 +50,15 @@
       },
       "category": "productivity",
       "source": "./work-style"
+    },
+    {
+      "name": "lecture-capture",
+      "description": "Record a Zoom lecture on macOS - system audio tap (works with AirPods), Zoom-window-only video, live Korean Whisper transcription, and structured lecture notes",
+      "author": {
+        "name": "sbigstar0310"
+      },
+      "category": "productivity",
+      "source": "./lecture-capture"
     }
   ]
 }

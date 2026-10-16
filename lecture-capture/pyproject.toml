@@ -1,0 +1,28 @@
+# The test environment for the lecture-capture scripts, managed by uv.
+# This is not a package: nothing here is built or installed, only the environment.
+#
+#     uv run --directory lecture-capture pytest                    # static + unit
+#     LECTURE_CAPTURE_REAL=1 uv run --directory lecture-capture pytest -m real
+#
+# merge.py uses only the standard library. The plugin's version lives in
+# .claude-plugin/plugin.json, not here.
+[project]
+name = "lecture-capture"
+version = "0.0.0"
+description = "Scripts for the lecture-capture skill: record, transcribe and merge a Zoom lecture."
+requires-python = ">=3.9"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers"]
+markers = [
+    "ffmpeg: builds media with the real ffmpeg, so it takes seconds and needs ffmpeg/ffprobe",
+    "real: records the real system audio and the Zoom window; runs only with LECTURE_CAPTURE_REAL=1",
+]

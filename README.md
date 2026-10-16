@@ -11,6 +11,7 @@ Personal Claude Code plugins by [@sbigstar0310](https://github.com/sbigstar0310)
 | `pptx-deck` | Design-aligned `.pptx` deck builder with faithful PNG previews |
 | `mobile-qa` | Parallel iOS + Android GUI QA subagents for React Native / Expo apps |
 | `work-style` | Working style injected at every session start and reminded every prompt — main session keeps the conversation flowing, slow work goes to the background, independent work runs in parallel subagents |
+| `lecture-capture` | Record a Zoom lecture on macOS — system audio tap (works with AirPods), Zoom-window-only video, live Korean Whisper transcription, structured lecture notes |
 
 ## Install
 
@@ -26,6 +27,7 @@ In a Claude Code session:
 /plugin install pptx-deck@daegyu-plugins
 /plugin install mobile-qa@daegyu-plugins
 /plugin install work-style@daegyu-plugins
+/plugin install lecture-capture@daegyu-plugins
 ```
 
 Or from a shell:
@@ -51,7 +53,8 @@ daegyu-plugins/
 ├── notion-manager/
 ├── progress/
 ├── pptx-deck/
-└── mobile-qa/
+├── mobile-qa/
+└── lecture-capture/
 ```
 
 ## Versioning policy
@@ -73,6 +76,11 @@ device, so its fixes need to propagate immediately. The tradeoff is that
 `claude plugin validate` passes. That warning is intended.
 
 ## Notes
+
+- **`lecture-capture`** is macOS-only (Apple Silicon, 14.2+). Run
+  `scripts/setup.sh` once; it builds AudioTee and the window recorder into the
+  plugin's gitignored `bin/`. The terminal app needs Screen & System Audio
+  Recording permission, or the tap records silence without an error.
 
 - **`pptx-deck`** needs `python-pptx`, `matplotlib`, `numpy`, `Pillow` for its
   render/preview scripts. Install them in whatever interpreter you point the skill at.
