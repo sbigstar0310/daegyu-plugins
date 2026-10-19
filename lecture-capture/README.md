@@ -107,14 +107,14 @@ sequenceDiagram
 ```
 lecture_YYYYMMDD_HHMM/
 ├── lecture_audio.m4a            오디오
-├── transcript_full.txt          전사 전문 (구간마다 [mm:ss] 제목)
+├── transcript_full.txt          전사 전문
 ├── transcript_full.srt          자막 파일 (영상에 들어 있지 않은 별도 파일)
-├── lecture.mp4                  영상 + 오디오 (자막 없음)
-│                                ↑ 위 네 개가 stop.sh가 만드는 최종 결과
-└── intermediate/                중간 결과 (지워도 최종 결과에는 영향 없음)
-    ├── audio/part_000.wav …         5분 단위 원본 오디오 (16 kHz mono)
-    ├── video/v_HHMMSS.mkv …         5분 단위 영상 (파일 이름 = 시작 시각)
-    ├── transcript/part_000.txt …    구간별 전사 (.srt 등 포함)
+├── lecture.mp4                  영상 + 오디오 (최종 결과)
+│                                
+└── intermediate/                중간 결과
+    ├── audio/part_000.wav …         5분 단위 오디오
+    ├── video/v_HHMMSS.mkv …         5분 단위 영상
+    ├── transcript/part_000.txt …    구간별 전사
     └── logs/                        프로세스별 로그
 ```
 
