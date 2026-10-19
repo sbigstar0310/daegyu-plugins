@@ -2,16 +2,18 @@
 
 macOS에서 듣고 있는 Zoom 강의를 녹음·녹화하고, 한국어로 받아 적은 뒤 강의 노트로 정리해 주는 플러그인입니다.
 
-- **오디오:** 시스템 소리를 Core Audio tap([AudioTee](https://github.com/makeusabrew/audiotee))으로 가져옵니다. 에어팟으로 들으면서도 녹음되고, BlackHole 같은 가상 오디오 장치는 필요 없습니다.
+- **오디오:** 시스템 소리를 Core Audio tap([AudioTee](https://github.com/makeusabrew/audiotee))으로 가져옵니다.
 - **영상:** ScreenCaptureKit으로 Zoom 회의 창 하나만 캡처합니다. 다른 창이 위에 겹쳐도 화면에 찍히지 않습니다. 프레임은 ffmpeg로 넘겨 5분 단위 mkv(10fps)로 저장합니다.
-- **전사:** mlx-whisper(`whisper-large-v3-turbo`)로 5분 구간이 끝날 때마다 내 Mac에서 받아 적습니다. 음성을 외부로 보내지 않습니다.
+- **전사:** mlx-whisper(`whisper-large-v3-turbo`)로 5분 구간이 끝날 때마다 내 Mac에서 받아 적습니다. (로컬 모델 사용)
 - **상태 확인:** `watch.sh`를 Claude Code의 Monitor에 연결하면, 구간이 끝날 때마다 상태를 알려 줍니다.
 
 ## 1. 한눈에 보기
 
 ### 1.1 전체 흐름
 
-전체 흐름은 **준비 → 시작 → 진행 중 → 종료·병합 → 요약** 다섯 단계입니다. `start.sh`가 오디오 녹음, 영상 녹화, 전사를 한꺼번에 시작하면, 진행 중에는 이 세 작업이 서로 따로(각자 프로세스로) 돌아갑니다. `watch.sh`와 `peek.sh`는 없어도 되는 보조 도구입니다.
+- 전체 흐름은 **준비 → 시작 → 진행 중 → 종료·병합 → 요약** 다섯 단계입니다. 
+- `start.sh`가 오디오 녹음, 영상 녹화, 전사를 한꺼번에 시작합니다.
+- 진행 중에는 이 세 작업이 서로 따로(각자 프로세스로) 돌아갑니다.
 
 ```mermaid
 flowchart TB
@@ -118,9 +120,8 @@ lecture_YYYYMMDD_HHMM/
     └── logs/                        프로세스별 로그
 ```
 
-`lecture.mp4`에는 자막이 들어 있지 않습니다. 자막이 필요하면 플레이어에서 `transcript_full.srt`를 같이 불러오세요. 이 자막의 시간은 **오디오를 녹음하기 시작한 시점**이 0초입니다. 그래서 영상이 늦게 시작했거나 중간에 끊겼다면 그만큼 어긋납니다.
-
-프로세스 id와 녹음 시작 시각을 담은 숨김 파일(`.pids` 등)은 최상단에 있지만, Finder에서는 보이지 않습니다.
+- `lecture.mp4`에는 자막이 들어 있지 않습니다.
+- 자막이 필요하면 플레이어에서 `transcript_full.srt`를 같이 불러오세요.
 
 ## 4. 사용
 
