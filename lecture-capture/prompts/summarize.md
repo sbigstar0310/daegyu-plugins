@@ -1,6 +1,6 @@
 # 강의 노트 작성 프롬프트
 
-입력: `transcript_full.txt` (구간마다 `## [mm:ss]` 헤더), `transcript_full.srt`, `video/`에서
+입력: `transcript_full.txt` (구간마다 `## [mm:ss]` 헤더), `transcript_full.srt`, `intermediate/video/`에서
 약 30초 간격으로 뽑은 화면 프레임(중복 제거), 강의 제목·연사 이름(알면).
 
 ## 작성 규칙

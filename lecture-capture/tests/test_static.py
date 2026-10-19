@@ -22,7 +22,7 @@ ALL_SCRIPTS = SHELL_SCRIPTS + [SCRIPTS / "merge.py", SCRIPTS / "winrec2" / "main
 
 def test_the_scripts_the_skill_names_are_all_there():
     names = {p.name for p in SHELL_SCRIPTS}
-    assert {"_common.sh", "setup.sh", "start.sh", "stop.sh", "peek.sh", "live_tx.sh",
+    assert {"_common.sh", "setup.sh", "doctor.sh", "start.sh", "stop.sh", "peek.sh", "live_tx.sh",
             "watch.sh", "winrec_loop.sh"} <= names
     assert (SCRIPTS / "merge.py").is_file()
     assert (SCRIPTS / "winrec2" / "main.swift").is_file()
@@ -117,3 +117,22 @@ def test_stop_reads_its_pids_from_the_lecture_dir_only():
     text = (SCRIPTS / "stop.sh").read_text()
     assert "pgrep" not in text and "ps " not in text
     assert "existing_dir" in text and "$D/.pids" in text
+
+
+# The finals sit at the top of a lecture folder; everything intermediate goes under MIDDIR.
+def test_merge_py_and_common_agree_on_the_intermediate_folder():
+    common = re.search(r"^MIDDIR=(\w+)", (SCRIPTS / "_common.sh").read_text(), re.M).group(1)
+    merge = re.search(r'^MID = D / "(\w+)"', (SCRIPTS / "merge.py").read_text(), re.M).group(1)
+    assert common == merge
+
+
+@pytest.mark.parametrize("script", SHELL_SCRIPTS, ids=lambda p: p.name)
+def test_no_script_puts_intermediates_next_to_the_finals(script):
+    for n, line in enumerate(script.read_text().splitlines(), 1):
+        assert not re.search(r"\$D/(audio|video|transcript|logs)\b", line), \
+            f"{script.name}:{n} uses $D/... instead of $MID/...: {line.strip()}"
+
+
+def test_merge_py_reads_intermediates_only_from_the_intermediate_folder():
+    text = (SCRIPTS / "merge.py").read_text()
+    assert not re.search(r'\bD / "(audio|video|transcript|logs)"', text)

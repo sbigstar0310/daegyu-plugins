@@ -1,6 +1,6 @@
 {
   "name": "lecture-capture",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Record a Zoom lecture on macOS — system audio via Core Audio tap (works with AirPods), Zoom-window-only video, live Korean Whisper transcription, 5-minute health checks, and structured lecture notes",
   "author": { "name": "daegyu" }
 }

@@ -1,7 +1,7 @@
 """Merge per-segment transcripts and mux video with audio.
 
 Alignment assumption: audio starts at `started` (epoch in .pids) and is continuous.
-Video segments are video/v_HHMMSS.mkv, named by ffmpeg (-strftime) with the local
+Video segments are intermediate/video/v_HHMMSS.mkv, named by ffmpeg (-strftime) with the local
 wall-clock time the segment opened; winrec2 emits frames at a constant real-time
 rate, so a segment's offset into the audio is (its start - started). Each segment
 is muxed with its audio slice, then the parts are concatenated into lecture.mp4,
@@ -12,6 +12,7 @@ import json, re, subprocess, sys
 from pathlib import Path
 
 D, SEG = Path(sys.argv[1]), int(sys.argv[2])
+MID = D / "intermediate"  # keep in sync with MIDDIR in _common.sh; the finals stay in D itself
 
 
 def ts(sec, srt=False):
@@ -29,7 +30,7 @@ def srt_sec(t):
 
 # transcript_full.txt / .srt
 txt, srt, idx = [], [], 1
-for p in sorted((D / "transcript").glob("part_*.txt")):
+for p in sorted((MID / "transcript").glob("part_*.txt")):
     n = int(p.stem.split("_")[1])
     off = n * SEG
     txt.append(f"\n## [{ts(off)}] {p.stem}\n")
@@ -55,7 +56,7 @@ import datetime as dt, tempfile
 pids = dict(l.split("=", 1) for l in (D / ".pids").read_text().split() if "=" in l)
 started = int(pids.get("started", 0))
 audio = D / "lecture_audio.m4a"
-segs = sorted(v for v in (D / "video").glob("v_*.mkv") if re.fullmatch(r"v_\d{6}", v.stem))
+segs = sorted(v for v in (MID / "video").glob("v_*.mkv") if re.fullmatch(r"v_\d{6}", v.stem))
 if not (audio.exists() and segs and started):
     sys.exit(0)
 
@@ -74,7 +75,7 @@ def seg_epoch(stem):
 
 
 segs.sort(key=lambda v: seg_epoch(v.stem))  # by time, not name: v_000100 follows v_235900
-tmp =Path(tempfile.mkdtemp(dir=D))
+tmp =Path(tempfile.mkdtemp(dir=MID))
 parts = []
 for i, v in enumerate(segs):
     dur = duration(v)

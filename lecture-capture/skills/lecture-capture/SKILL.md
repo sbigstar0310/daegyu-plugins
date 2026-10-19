@@ -9,10 +9,12 @@ Scripts live in `${CLAUDE_PLUGIN_ROOT}/scripts/` (below: `$S`). Everything for o
 lecture goes into one folder (`$D`, default `~/Desktop/lecture_YYYYMMDD_HHMM`):
 
 ```
-$D/audio/part_NNN.wav      16 kHz mono, 5-minute segments (system audio tap)
-$D/video/v_HHMMSS.mkv     Zoom meeting window only, 10 fps H.264, 5-minute segments
-$D/transcript/part_NNN.*   Whisper output per segment (txt/srt/vtt/json/tsv)
-$D/logs/                   process logs        $D/.pids  process ids + audio start epoch
+$D/lecture_audio.m4a, transcript_full.txt/.srt, lecture.mp4     the finals (written by stop.sh)
+$D/intermediate/audio/part_NNN.wav      16 kHz mono, 5-minute segments (system audio tap)
+$D/intermediate/video/v_HHMMSS.mkv      Zoom meeting window only, 10 fps H.264, 5-minute segments
+$D/intermediate/transcript/part_NNN.*   Whisper output per segment (txt/srt/vtt/json/tsv)
+$D/intermediate/logs/                   process logs
+$D/.pids                                process ids + audio start epoch (hidden state files stay in $D)
 ```
 
 The lecture is live and the user is listening. Keep every step in the background,
@@ -20,8 +22,13 @@ report briefly in Korean, and never block the turn.
 
 ## 1. Setup (idempotent, ~10 s first time)
 
-`$S/setup.sh` builds AudioTee + `winrec2` into the plugin's `bin/`, installs
-`mlx-whisper` with uv, and checks ffmpeg. Then confirm permission:
+Run `$S/doctor.sh` first when unsure the machine is ready: it checks the install, the tap permission
+(it plays a short tone for 5 s), Whisper, the Zoom window and disk space, and prints the fix for every ✗.
+Use `--quick` for static checks only. It is safe while a lecture is recording.
+
+`$S/setup.sh` downloads the prebuilt AudioTee + `winrec2` for this plugin version into the
+plugin's `bin/` (checksum-verified),
+installs `mlx-whisper` with uv, and checks ffmpeg. Then confirm permission:
 시스템 설정 → 개인정보 보호 및 보안 → **화면 및 시스템 오디오 녹음** → enable the
 terminal app (Ghostty/Terminal/iTerm). Open the pane for the user with
 `open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"`.

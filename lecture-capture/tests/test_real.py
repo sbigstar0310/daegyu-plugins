@@ -145,7 +145,7 @@ def test_setup_start_peek_stop_on_the_real_machine(lecture):
         assert duration(mp4) == pytest.approx(duration(audio), abs=5)
     else:
         # No Zoom window: no segments, no mp4, and stop.sh still succeeded.
-        assert not list((lecture / "video").glob("v_*.mkv"))
+        assert not list((lecture / "intermediate" / "video").glob("v_*.mkv"))
         assert not mp4.exists()
         assert "영상:" not in r.stdout
 

@@ -4,6 +4,7 @@
 setopt nullglob
 source ${0:A:h}/_common.sh
 D=$(existing_dir ${1:#--*}) || exit 1
+MID=$D/$MIDDIR
 [[ -f $D/.pids ]] || { echo ".pids 없음: $D"; exit 1; }
 
 # Video first: the loop's trap sends winrec2 exactly one SIGINT; ffmpeg finalizes the mkv on EOF.
@@ -22,11 +23,11 @@ for i in {1..600}; do alive "$(pid_of $D live_tx)" || break; sleep 2; done
 rm -f $D/.audio.fifo $D/.video.fifo
 [[ $* == *--no-merge* ]] && exit 0
 
-parts=($D/audio/part_*.wav)
+parts=($MID/audio/part_*.wav)
 if (( $#parts )); then
   printf "file '%s'\n" $parts > $D/.audio_list.txt
   ffmpeg -hide_banner -loglevel error -y -f concat -safe 0 -i $D/.audio_list.txt -c:a aac -b:a 64k $D/lecture_audio.m4a
   echo "오디오: $D/lecture_audio.m4a"
 fi
 
-python3 -I ${0:A:h}/merge.py $D $SEGMENT_SEC
+run_python ${0:A:h}/merge.py $D $SEGMENT_SEC
