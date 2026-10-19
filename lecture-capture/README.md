@@ -14,41 +14,16 @@ macOS에서 듣고 있는 Zoom 강의를 녹음·녹화하고, 한국어로 받�
 전체 흐름은 **준비 → 시작 → 진행 중 → 종료·병합 → 요약** 다섯 단계입니다. `start.sh`가 오디오 녹음, 영상 녹화, 전사를 한꺼번에 시작하면, 진행 중에는 이 세 작업이 서로 따로(각자 프로세스로) 돌아갑니다. `watch.sh`와 `peek.sh`는 없어도 되는 보조 도구입니다.
 
 ```mermaid
-%%{init: {"themeVariables": {"fontSize": "22px"}, "flowchart": {"nodeSpacing": 30, "rankSpacing": 40, "padding": 14, "subGraphTitleMargin": {"top": 6, "bottom": 22}}}}%%
 flowchart TB
-    subgraph FLOW["전체 흐름"]
-        direction LR
-        A["① 준비<br/>setup.sh"] --> B["② 시작<br/>start.sh"]
-        B --> C["③ 진행 중<br/>세 작업이 따로 돎"]
-        C --> D["④ 종료·병합<br/>stop.sh"]
-        D --> E["⑤ 요약<br/>Claude"]
-    end
-
+    A["① 준비 · setup.sh"] --> B["② 시작 · start.sh"]
     subgraph RUN["③ 진행 중 · 서로 따로 도는 세 작업"]
-        direction TB
-        subgraph AUDIO["🎧 오디오 녹음"]
-            direction LR
-            A1["시스템 소리<br/>(Zoom)"] --> A2["audiotee + ffmpeg<br/>Core Audio tap<br/>5분마다 자름"] --> A4[("audio/<br/>part_NNN.wav")]
-        end
-        subgraph VIDEO["🎬 영상 녹화"]
-            direction LR
-            V1["Zoom 회의 창<br/>하나만"] --> V2["winrec2 + ffmpeg<br/>ScreenCaptureKit<br/>10 fps"] --> V4[("video/<br/>v_HHMMSS.mkv")]
-        end
-        subgraph TX["📝 전사"]
-            direction LR
-            T1["wav가 완성되면<br/>(30초마다 확인)"] --> T2["live_tx.sh<br/>+ mlx_whisper<br/>large-v3-turbo"] --> T3[("transcript/<br/>part_NNN.txt")]
-        end
-        AUDIO ~~~ VIDEO ~~~ TX
-    end
-
-    subgraph TOOLS["보조 도구 (선택)"]
         direction LR
-        W["👀 watch.sh<br/>구간이 끝날 때마다<br/>상태를 알려 줌"]
-        P["🔍 peek.sh<br/>녹음 중인 구간을<br/>바로 받아 적음"]
+        R2["🎬 영상 녹화<br/>winrec2<br/>+ ffmpeg"] ~~~ R1["🎧 오디오 녹음<br/>audiotee<br/>+ ffmpeg"] -.-> R3["📝 전사<br/>live_tx.sh<br/>+ mlx_whisper"]
     end
-
-    FLOW ~~~ RUN
-    RUN ~~~ TOOLS
+    B --> RUN --> D["④ 종료·병합 · stop.sh"] --> E["⑤ 요약 · Claude"]
+    W["보조(선택)<br/>watch.sh 상태 확인<br/>peek.sh 중간 확인"]
+    E ~~~ W
+    style W stroke-dasharray: 4 4
 ```
 
 `audiotee`와 `winrec2`는 named pipe(`.audio.fifo`, `.video.fifo`)로 `ffmpeg`에 데이터를 넘기고, `ffmpeg`가 5분마다 파일을 나눕니다.
@@ -82,74 +57,47 @@ flowchart TB
 ### 1.3 종료·병합: 무엇이 만들어지나
 
 ```mermaid
-%%{init: {"themeVariables": {"fontSize": "22px"}, "flowchart": {"nodeSpacing": 30, "rankSpacing": 40, "padding": 14}}}%%
-flowchart TB
-    S["stop.sh<br/>영상 → 오디오 순으로 종료<br/>마지막 전사를 기다림"]
-    S --> M1["wav를<br/>이어 붙임"] --> O1["lecture_audio.m4a"]
-    S --> M2["merge.py<br/>구간별 전사를<br/>하나로 합침"] --> O2["transcript_full<br/>.txt / .srt"]
-    S --> M3["merge.py<br/>영상에 오디오를<br/>시작 시각에 맞춰 붙임"] --> O3["lecture.mp4"]
-    O1 --> M3
-    O2 --> R["⑤ 요약<br/>prompts/summarize.md"]
-    O3 -->|"30초마다 한 장씩 뽑은 화면"| R
+flowchart LR
+    S["stop.sh<br/>영상 → 오디오 순으로 종료"]
+    S --> O1["lecture_audio.m4a<br/>wav를 이어 붙임"]
+    S --> O2["transcript_full<br/>.txt / .srt<br/>전사를 합침"]
+    S --> O3["lecture.mp4<br/>영상에 오디오를 합침"]
+    O1 --> O3
+    O2 --> R["⑤ 요약"]
+    O3 --> R
 ```
 
 ## 2. 시간 순서
 
-사용자, Claude, 그리고 세 작업이 시간 순으로 어떻게 주고받는지 보여 줍니다.
+Claude와 세 작업이 시간 순으로 어떻게 주고받는지 보여 줍니다. 사용자의 요청은 노란 메모로 표시했습니다.
 
 ```mermaid
-%%{init: {"themeVariables": {"fontSize": "20px"}, "sequence": {"actorFontSize": 20, "messageFontSize": 20, "noteFontSize": 20, "width": 120, "actorMargin": 24, "height": 56, "messageMargin": 36, "boxMargin": 8, "wrap": false}}}%%
 sequenceDiagram
-    actor U as 사용자
     participant C as Claude
     participant A as 🎧 오디오
     participant V as 🎬 영상
     participant T as 📝 전사
-    participant M as 👀 watch.sh
 
-    U->>C: 강의 녹음해줘
-    C->>C: setup.sh
-
-    Note over C,T: start.sh : 세 작업을 동시에, 따로 시작
-    par 오디오
+    Note over C: 사용자: "강의 녹음해줘"
+    par start.sh가 동시에 시작
         C->>A: audiotee 시작
-    and 영상
+    and
         C->>V: winrec_loop 시작
-    and 전사
+    and
         C->>T: live_tx 시작
     end
     A-->>C: 5초 시험 녹음
-    Note over A: 무음이면 exit 3
-    C->>M: Monitor 연결
-    Note over V: 오디오 tap이 살아 있는 동안만 돈다
 
-    loop 5분마다 (구간이 끝날 때)
-        par 오디오
-            A->>A: wav 완성
-        and 영상
-            V->>V: mkv 완성
-        end
-        A-->>T: 완성된 wav
-        T->>T: 받아 적기
-        M-->>C: 상태 한 줄
-        C-->>U: 한 줄로 알림
+    loop 5분마다
+        A-->>T: wav 완성
+        T-->>C: 상태 한 줄
     end
 
-    opt 중간 확인
-        U->>C: 지금 뭐라고 해?
-        C->>A: peek.sh
-        A-->>C: 받아 적은 내용
-    end
-
-    U->>C: 끝났어
-    Note over C,T: stop.sh : 영상 → 오디오 → 전사 순서로 마무리
-    C->>V: SIGINT
-    C->>A: SIGTERM
-    A-->>T: 마지막 wav
+    Note over C: 사용자: "끝났어"
+    C->>V: 종료
+    C->>A: 종료
     T->>T: 남은 구간 받아 적기
-    C->>C: merge.py로 합치기
-    C->>C: 강의 노트 쓰기
-    C-->>U: 강의 노트
+    C->>C: 합치고 노트 작성
 ```
 
 ## 3. 산출물
