@@ -20,8 +20,9 @@ report briefly in Korean, and never block the turn.
 
 ## 1. Setup (idempotent, ~10 s first time)
 
-`$S/setup.sh` builds AudioTee + `winrec2` into the plugin's `bin/`, installs
-`mlx-whisper` with uv, and checks ffmpeg. Then confirm permission:
+`$S/setup.sh` downloads the prebuilt AudioTee + `winrec2` for this plugin version into the
+plugin's `bin/` (checksum-verified; falls back to compiling with swift, which needs Xcode CLT),
+installs `mlx-whisper` with uv, and checks ffmpeg. Then confirm permission:
 시스템 설정 → 개인정보 보호 및 보안 → **화면 및 시스템 오디오 녹음** → enable the
 terminal app (Ghostty/Terminal/iTerm). Open the pane for the user with
 `open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"`.

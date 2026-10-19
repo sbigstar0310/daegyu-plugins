@@ -19,7 +19,9 @@ scripts/watch.sh ~/Desktop/lecture_x  # 상태 점검 스트림
 scripts/stop.sh  ~/Desktop/lecture_x  # 종료 + 오디오/전사/영상 병합
 ```
 
-요구 사항: Apple Silicon, macOS 14.2 이상, ffmpeg, Xcode CLT(swift), uv.
+요구 사항: Apple Silicon, macOS 14.2 이상, ffmpeg, uv. Xcode CLT는 필요 없습니다: `setup.sh`가 이 플러그인 버전의 GitHub Release에서 미리 빌드된 `audiotee`·`winrec2`를 받아 SHA256을 확인하고 설치합니다. 받지 못하면(오프라인 등) 소스에서 빌드하는데, 그때만 Xcode CLT(swift)가 필요합니다. 항상 소스에서 빌드하려면 `LECTURE_BUILD_FROM_SOURCE=1 scripts/setup.sh`.
+
+서드파티 라이선스(AudioTee, MIT)는 [NOTICE.md](NOTICE.md)를 보세요.
 권한: 시스템 설정 → 화면 및 시스템 오디오 녹음 → 터미널 앱을 켜야 합니다. 권한이 없으면 무음으로 녹음됩니다.
 
 강의를 녹음·녹화하기 전에 주최 측 허락을 확인하세요.
