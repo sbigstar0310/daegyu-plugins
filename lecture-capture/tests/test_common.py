@@ -140,3 +140,41 @@ def test_mean_db_reads_wav_and_raw_s16le(home, tmp_path):
     assert -30 < float(loud_db) < 0
     assert abs(float(raw_db) - float(loud_db)) < 1
     assert quiet_db == "-inf" or float(quiet_db) < -90
+
+
+def fake_bin(tmp_path, **scripts):
+    """A PATH dir holding stub commands that print their own name and arguments."""
+    d = tmp_path / "fakebin"
+    d.mkdir(exist_ok=True)
+    for name, body in scripts.items():
+        f = d / name
+        f.write_text(f"#!/bin/zsh\n{body}\n")
+        f.chmod(0o755)
+    return d
+
+
+def test_run_python_uses_python3_when_it_is_usable(home, tmp_path):
+    fb = fake_bin(tmp_path, python3='print "python3 $@"', uv='print "uv $@"')
+    r = run("run_python merge.py a b", home, PATH=f"{fb}:/usr/bin:/bin")
+    assert r.stdout.strip() == "python3 -I merge.py a b"
+
+
+def test_run_python_falls_back_to_a_uv_managed_python_when_python3_is_unusable(home, tmp_path):
+    fb = fake_bin(tmp_path, python3='print "python3 $@"', uv='print "uv $@"')
+    r = run("python_is_usable() { return 1 }; run_python merge.py a b", home, PATH=f"{fb}:/usr/bin:/bin")
+    assert r.stdout.strip() == "uv run --no-project --managed-python python -I merge.py a b"
+
+
+def test_python3_counts_as_unusable_when_it_is_the_macos_stub_without_clt(home, tmp_path):
+    # Fake both halves: command -v resolves to the stub path, xcode-select says there is no CLT.
+    fb = fake_bin(tmp_path, **{"xcode-select": "exit 2"})
+    r = run('command() { [[ $2 == python3 ]] && print /usr/bin/python3 || builtin command "$@" }; '
+            "python_is_usable && print usable || print unusable", home, PATH=f"{fb}:/usr/bin:/bin")
+    assert r.stdout.strip() == "unusable"
+
+
+def test_python3_counts_as_usable_when_the_macos_stub_has_clt_behind_it(home, tmp_path):
+    fb = fake_bin(tmp_path, **{"xcode-select": "print /Library/Developer/CommandLineTools"})
+    r = run('command() { [[ $2 == python3 ]] && print /usr/bin/python3 || builtin command "$@" }; '
+            "python_is_usable && print usable || print unusable", home, PATH=f"{fb}:/usr/bin:/bin")
+    assert r.stdout.strip() == "usable"

@@ -21,6 +21,9 @@ import pytest
 
 from conftest import DEAD_PID, SCRIPTS, duration, ffmpeg, mean_db, probe
 
+# Intermediate files live here; only the finals sit next to .pids (see MIDDIR in _common.sh).
+MID = "intermediate"
+
 MERGE = SCRIPTS / "merge.py"
 PART = 3  # seconds of audio per synthetic part
 SEG = 300  # what stop.sh passes (SEGMENT_SEC); only the transcript headers use it
@@ -44,21 +47,21 @@ def make_lecture(d, started, loud=(True, False, True), videos=(), transcripts=Tr
     """A stopped lecture folder. loud[i] says whether audio part i is a tone or silence.
     videos is a list of (seconds after started, length in seconds)."""
     for sub in ("audio", "video", "transcript", "logs"):
-        (d / sub).mkdir(parents=True, exist_ok=True)
+        (d / MID / sub).mkdir(parents=True, exist_ok=True)
     write_pids(d, started)
     for i, is_loud in enumerate(loud):
         src = (f"sine=frequency={440 + 220 * i}:duration={PART}:sample_rate=16000" if is_loud
                else f"anullsrc=r=16000:cl=mono:d={PART}")
         ffmpeg("-f", "lavfi", "-i", src, "-t", PART, "-ac", "1", "-ar", 16000,
-               "-c:a", "pcm_s16le", d / "audio" / f"part_{i:03}.wav")
+               "-c:a", "pcm_s16le", d / MID / "audio" / f"part_{i:03}.wav")
     for off, length in videos:
         ffmpeg("-f", "lavfi", "-i", f"testsrc=size=320x240:rate=10:duration={length}",
                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-               d / "video" / f"v_{hhmmss(started + off)}.mkv")
+               d / MID / "video" / f"v_{hhmmss(started + off)}.mkv")
     if transcripts:
         for i in range(len(loud)):
-            (d / "transcript" / f"part_{i:03}.txt").write_text(f"  구간 {i} 문장입니다.\n\n")
-            (d / "transcript" / f"part_{i:03}.srt").write_text(
+            (d / MID / "transcript" / f"part_{i:03}.txt").write_text(f"  구간 {i} 문장입니다.\n\n")
+            (d / MID / "transcript" / f"part_{i:03}.srt").write_text(
                 f"1\n00:00:00,000 --> 00:00:01,500\n구간 {i} 첫 문장\n\n"
                 f"2\n00:00:01,500 --> 00:00:04,250\n구간 {i} 둘째 문장\n")
     return d
@@ -85,12 +88,12 @@ def streams(path):
 # ---- transcripts (no ffmpeg needed) ----
 
 def text_lecture(d, parts, srt=True):
-    (d / "transcript").mkdir(parents=True)
+    (d / MID / "transcript").mkdir(parents=True)
     write_pids(d, noon_today())
     for n, body in parts.items():
-        (d / "transcript" / f"part_{n:03}.txt").write_text(body)
+        (d / MID / "transcript" / f"part_{n:03}.txt").write_text(body)
         if srt:
-            (d / "transcript" / f"part_{n:03}.srt").write_text(
+            (d / MID / "transcript" / f"part_{n:03}.srt").write_text(
                 f"1\n00:00:01,500 --> 00:00:03,000\n{body.strip()}\n")
     return d
 
@@ -124,7 +127,7 @@ def test_the_segment_length_argument_sets_the_offsets(tmp_path):
 
 def test_malformed_srt_blocks_are_skipped_and_a_missing_srt_is_fine(tmp_path):
     d = text_lecture(tmp_path / "lec", {0: "a", 1: "b"}, srt=False)
-    (d / "transcript" / "part_000.srt").write_text(
+    (d / MID / "transcript" / "part_000.srt").write_text(
         "garbage\n\n1\nnot a time\ntext\n\n2\n00:00:02,000 --> 00:00:02,500\nkept\n")
     merge(d)
     assert (d / "transcript_full.srt").read_text() == "1\n00:00:02,000 --> 00:00:02,500\nkept\n"
@@ -170,7 +173,7 @@ def test_stop_merges_audio_transcript_and_a_continuous_video(tmp_path):
 
     assert (d / ".stopped").exists()
     leftovers = {p.name for p in d.iterdir()} - {
-        "audio", "video", "transcript", "logs", ".pids", ".stopped", ".audio_list.txt",
+        MID, ".pids", ".stopped", ".audio_list.txt",
         "lecture_audio.m4a", "transcript_full.txt", "transcript_full.srt", "lecture.mp4"}
     assert not leftovers, f"left behind: {leftovers}"
 
@@ -196,7 +199,7 @@ def test_segments_across_midnight_stay_in_time_order(tmp_path):
     # v_235957 (loud part 0) then v_000000 (silent part 1). By name, 000000 sorts first.
     started = int(dt.datetime.combine(dt.date.today(), dt.time(23, 59, 57)).timestamp())
     d = make_lecture(tmp_path / "lec", started, videos=[(0, PART), (PART, PART)])
-    assert sorted(p.name for p in (d / "video").iterdir()) == ["v_000000.mkv", "v_235957.mkv"]
+    assert sorted(p.name for p in (d / MID / "video").iterdir()) == ["v_000000.mkv", "v_235957.mkv"]
     out = stop(d).stdout
     assert "구간 2개" in out and "오디오 00:00부터" in out
     mp4 = d / "lecture.mp4"
@@ -231,10 +234,10 @@ def test_stray_and_too_short_video_files_are_ignored(tmp_path):
     started = noon_today()
     d = make_lecture(tmp_path / "lec", started, videos=[(0, PART)])
     # Not v_HHMMSS, and an empty file with a valid name.
-    (d / "video" / f"v_{hhmmss(started)}.mkv").rename(d / "video" / "v_keep.mkv")
-    ffmpeg("-i", d / "video" / "v_keep.mkv", "-c", "copy", d / "video" / f"v_{hhmmss(started)}.mkv")
-    (d / "video" / "v_keep.mkv").rename(d / "video" / "v_120000_old.mkv")
-    (d / "video" / f"v_{hhmmss(started + 5)}.mkv").write_bytes(b"")
+    (d / MID / "video" / f"v_{hhmmss(started)}.mkv").rename(d / MID / "video" / "v_keep.mkv")
+    ffmpeg("-i", d / MID / "video" / "v_keep.mkv", "-c", "copy", d / MID / "video" / f"v_{hhmmss(started)}.mkv")
+    (d / MID / "video" / "v_keep.mkv").rename(d / MID / "video" / "v_120000_old.mkv")
+    (d / MID / "video" / f"v_{hhmmss(started + 5)}.mkv").write_bytes(b"")
     out = stop(d).stdout
     assert "구간 1개" in out
     assert duration(d / "lecture.mp4") == pytest.approx(PART, abs=1.0)

@@ -4,6 +4,7 @@
 # 5-minute mkv segments named by wall-clock start time (merge.py aligns them to audio by name).
 source ${0:A:h}/_common.sh
 D=$1; AT=$(pid_of $D audiotee)
+MID=$D/$MIDDIR
 OWNER=${LECTURE_WINDOW_OWNER:-Zoom}
 titles_spec=${LECTURE_WINDOW_TITLE:-"Zoom 회의|Zoom Meeting"}
 TITLES=("${(@s:|:)titles_spec}")
@@ -23,9 +24,9 @@ while alive $AT; do
     rm -f $FIFO; mkfifo $FIFO
     ffmpeg -hide_banner -loglevel error -f rawvideo -pix_fmt bgra -s ${W}x${H} -r $FPS -i $FIFO \
       -c:v libx264 -preset veryfast -crf 26 -g $(( FPS * 5 )) -pix_fmt yuv420p \
-      -f segment -segment_time $SEGMENT_SEC -strftime 1 $D/video/v_%H%M%S.mkv 2>>$D/logs/ffmpeg_video.log &
+      -f segment -segment_time $SEGMENT_SEC -strftime 1 $MID/video/v_%H%M%S.mkv 2>>$MID/logs/ffmpeg_video.log &
     echo $! > $D/.vffmpeg.pid
-    $WINREC $OWNER $t $W $H $FPS > $FIFO 2>>$D/logs/winrec.log &
+    $WINREC $OWNER $t $W $H $FPS > $FIFO 2>>$MID/logs/winrec.log &
     echo $! > $D/.winrec.pid
     wait $(cat $D/.winrec.pid)
     wait $(cat $D/.vffmpeg.pid)               # EOF on the fifo → ffmpeg closes the segment

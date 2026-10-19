@@ -7,21 +7,201 @@ macOS에서 듣고 있는 Zoom 강의를 녹음하고, Zoom 창만 녹화하고,
 - **전사:** mlx-whisper(`whisper-large-v3-turbo`)로 5분 구간마다 로컬에서 받아씁니다. 외부로 업로드하지 않습니다.
 - **점검:** `watch.sh`를 Claude Code의 Monitor에 걸어서 구간마다 상태를 보고합니다.
 
-## 사용
+## 1. 한눈에 보기
 
-Claude Code에서 "줌 강의 녹음해서 정리해줘"라고 하면 스킬이 아래 순서로 진행합니다. 직접 실행할 때:
+### 1.1 전체 흐름과 진행 중 3트랙
+
+전체 흐름은 **준비 → 시작 → 진행 중 → 종료·병합 → 요약** 5단계입니다. `start.sh`가 오디오 녹음, 영상 녹화, 전사를 한꺼번에 시작하고, 진행 중에는 이 3트랙이 **서로 독립된 프로세스**로 돕니다. `watch.sh`와 `peek.sh`는 곁에서 보기만 합니다.
+
+```mermaid
+%%{init: {"themeVariables": {"fontSize": "22px"}, "flowchart": {"nodeSpacing": 30, "rankSpacing": 40, "padding": 14, "subGraphTitleMargin": {"top": 6, "bottom": 22}}}}%%
+flowchart TB
+    subgraph FLOW["전체 흐름"]
+        direction LR
+        A["① 준비<br/>setup.sh"] --> B["② 시작<br/>start.sh"]
+        B --> C["③ 진행 중<br/>3트랙 독립"]
+        C --> D["④ 종료·병합<br/>stop.sh"]
+        D --> E["⑤ 요약<br/>Claude"]
+    end
+
+    subgraph RUN["③ 진행 중 · 독립된 프로세스 3개"]
+        direction TB
+        subgraph AUDIO["🎧 오디오 녹음"]
+            direction LR
+            A1["시스템 소리<br/>(Zoom)"] --> A2["audiotee + ffmpeg<br/>Core Audio tap<br/>5분 분할"] --> A4[("audio/<br/>part_NNN.wav")]
+        end
+        subgraph VIDEO["🎬 영상 녹화"]
+            direction LR
+            V1["Zoom 창<br/>하나만"] --> V2["winrec2 + ffmpeg<br/>ScreenCaptureKit<br/>10 fps"] --> V4[("video/<br/>v_HHMMSS.mkv")]
+        end
+        subgraph TX["📝 전사"]
+            direction LR
+            T1["wav 완성 대기<br/>30초마다 확인"] --> T2["live_tx.sh<br/>+ mlx_whisper<br/>large-v3-turbo"] --> T3[("transcript/<br/>part_NNN.txt")]
+        end
+        AUDIO ~~~ VIDEO ~~~ TX
+    end
+
+    subgraph TOOLS["곁에서 돕는 도구 (트랙에 관여 안 함)"]
+        direction TB
+        W["👀 watch.sh (Monitor)<br/>구간마다 한 줄 보고<br/>죽으면 ALERT"]
+        P["🔍 peek.sh (수동)<br/>쓰는 중인 구간을<br/>즉석 전사"]
+    end
+
+    FLOW ~~~ RUN
+    RUN ~~~ TOOLS
+```
+
+`audiotee`와 `winrec2`는 named pipe(`.audio.fifo`, `.video.fifo`)로 `ffmpeg`에 데이터를 넘기고, `ffmpeg`가 5분 단위로 파일을 자릅니다.
+
+### 1.2 구성 요소: 트랙마다 어떤 프로그램을 쓰나
+
+녹음, 녹화, 전사는 **서로 다른 프로그램이 독립된 프로세스로** 돌아갑니다. 하나가 죽어도 나머지는 계속 돌고, `watch.sh`가 각각의 pid를 따로 감시합니다.
+
+| 트랙 | 하는 일 | 프로그램 (프로세스) | macOS 기능 / 모델 | 입력 → 출력 | 권한 |
+|---|---|---|---|---|---|
+| 🎧 **오디오 녹음** | 시스템 소리를 복사해 5분 단위 wav로 저장 | `audiotee` → `ffmpeg` | Core Audio tap (macOS 14.2+) | 시스템 소리 → `audio/part_NNN.wav` | 화면 및 시스템 오디오 녹음 |
+| 🎬 **영상 녹화** | Zoom 창 하나만 캡처해 5분 단위 mkv로 저장 | `winrec2` → `ffmpeg`(libx264), 감시·재시작은 `winrec_loop.sh` | ScreenCaptureKit | Zoom 창 → `video/v_HHMMSS.mkv` | 화면 및 시스템 오디오 녹음 |
+| 📝 **전사** | 다 쓰인 wav를 한국어로 받아쓰기 | `live_tx.sh` → `mlx_whisper` | `whisper-large-v3-turbo` (로컬, MLX) | `part_NNN.wav` → `transcript/part_NNN.txt·.srt` | 없음 |
+| 👀 **점검** | 구간마다 상태 보고, 프로세스 사망 시 경고 | `watch.sh` (Claude Code Monitor) | — | `.pids`, 파일 → 한 줄 보고 | 없음 |
+
+각 프로그램의 출처는 이렇습니다.
+
+| 프로그램 | 출처 | 설치 |
+|---|---|---|
+| `audiotee` | 외부 오픈소스 ([makeusabrew/audiotee](https://github.com/makeusabrew/audiotee), MIT) | `setup.sh`가 릴리스에서 다운로드 |
+| `winrec2` | 이 플러그인의 자체 Swift 코드 (`scripts/winrec2/main.swift`) | `setup.sh`가 릴리스에서 다운로드 |
+| `ffmpeg` | 외부 | `brew install ffmpeg` |
+| `mlx_whisper` | 외부 (`mlx-whisper`) | `setup.sh`가 `uv tool install` |
+
+**트랙 사이의 연결은 딱 이것뿐입니다.**
+- 전사는 오디오의 wav 파일이 완성되기를 기다립니다. 파일로만 연결되고, 오디오가 계속 쓰는 동안에도 전사는 뒤에서 따라갑니다.
+- 영상 루프는 오디오 tap이 살아 있는 동안만 돕니다. 즉 오디오가 "진행 중"의 기준 시계입니다.
+- 영상과 오디오는 진행 중에는 서로 모르고, 종료 후 `merge.py`가 파일명의 시작 시각으로 맞춥니다.
+
+### 1.3 종료·병합: 무엇이 만들어지나
+
+```mermaid
+%%{init: {"themeVariables": {"fontSize": "22px"}, "flowchart": {"nodeSpacing": 30, "rankSpacing": 40, "padding": 14}}}%%
+flowchart TB
+    S["stop.sh<br/>영상 → 오디오 종료<br/>마지막 전사 대기"]
+    S --> M1["wav 구간<br/>이어붙이기"] --> O1["lecture_audio.m4a"]
+    S --> M2["merge.py<br/>구간 전사 합치기<br/>(번호 × 300초)"] --> O2["transcript_full<br/>.txt / .srt"]
+    S --> M3["merge.py<br/>mkv + 오디오 조각을<br/>시작 시각으로 정렬"] --> O3["lecture.mp4"]
+    O1 --> M3
+    O2 --> R["⑤ 요약<br/>prompts/summarize.md"]
+    O3 -->|"30초 간격 프레임"| R
+```
+
+## 2. 시간 순서
+
+누가 언제 무엇을 하는지 시간 순으로 보면 이렇습니다.
+
+```mermaid
+%%{init: {"themeVariables": {"fontSize": "20px"}, "sequence": {"actorFontSize": 20, "messageFontSize": 20, "noteFontSize": 20, "width": 120, "actorMargin": 24, "height": 56, "messageMargin": 36, "boxMargin": 8, "wrap": false}}}%%
+sequenceDiagram
+    actor U as 사용자
+    participant C as Claude
+    participant A as 🎧 오디오
+    participant V as 🎬 영상
+    participant T as 📝 전사
+    participant M as 👀 watch.sh
+
+    U->>C: 강의 녹음해줘
+    C->>C: setup.sh
+
+    Note over C,T: start.sh : 세 트랙을 독립 프로세스로 동시에 시작
+    par 오디오
+        C->>A: audiotee 시작
+    and 영상
+        C->>V: winrec_loop 시작
+    and 전사
+        C->>T: live_tx 시작
+    end
+    A-->>C: 5초 무음 점검
+    Note over A: 무음이면 exit 3
+    C->>M: Monitor 연결
+    Note over V: 오디오 tap이 살아 있는 동안만 돈다
+
+    loop 5분마다 (구간 1개)
+        par 오디오
+            A->>A: wav 완성
+        and 영상
+            V->>V: mkv 완성
+        end
+        A-->>T: wav 파일 전달
+        T->>T: 받아쓰기
+        M-->>C: 구간 상태 한 줄
+        C-->>U: 보고
+    end
+
+    opt 중간 확인
+        U->>C: 지금 뭐라고 해?
+        C->>A: peek.sh
+        A-->>C: 진행 중 wav 전사
+    end
+
+    U->>C: 끝났어
+    Note over C,T: stop.sh : 영상 → 오디오 → 전사 순
+    C->>V: SIGINT
+    C->>A: SIGTERM
+    A-->>T: 마지막 wav
+    T->>T: 남은 구간 받아쓰기
+    C->>C: merge.py 병합
+    C->>C: 강의 노트 작성
+    C-->>U: 강의 노트
+```
+
+## 3. 왜 이렇게 만들었나
+
+| 선택 | 이유 |
+|---|---|
+| 시스템 오디오를 tap으로 가져옴 | 출력 장치와 무관하게 소리를 복사하므로 에어팟으로 들어도 녹음됨. 가상 오디오 장치 불필요 |
+| 창 하나만 캡처 (`desktopIndependentWindow`) | 전체 화면 녹화는 다른 창(메신저 등)까지 찍힘. 창 단위는 겹친 창을 무시함 |
+| 프레임을 파일이 아니라 ffmpeg로 파이프 | ScreenCaptureKit 프레임을 AVAssetWriter에 쓰면 수십 초마다 간헐적으로 실패함 |
+| 5분 단위 구간 | 구간이 끝나는 대로 전사하고 점검할 수 있고, 중간에 죽어도 앞부분은 남음 |
+| 구간 파일명에 시작 시각 | 영상이 끊겼다 재시작해도 오디오와 시각으로 맞춰 어긋남(drift)이 쌓이지 않음 (오차 약 1초 이내) |
+| 프로세스를 `.pids`로 관리 | 이름으로 kill하지 않으므로 다른 녹음이나 테스트가 서로 죽이지 않음 |
+
+## 4. 산출물
+
+최상단에는 **최종 결과만** 두고, 중간 결과는 모두 `intermediate/` 아래에 둡니다.
+
+```
+lecture_YYYYMMDD_HHMM/
+├── lecture_audio.m4a            ┐
+├── transcript_full.txt / .srt   ├ 최종 결과 (stop.sh가 만듦)
+├── lecture.mp4                  ┘
+│
+└── intermediate/                중간 결과 (지워도 최종 결과에는 영향 없음)
+    ├── audio/part_000.wav …         5분 단위 원본 오디오 (16 kHz mono)
+    ├── video/v_HHMMSS.mkv …         5분 단위 영상 (이름 = 시작 시각)
+    ├── transcript/part_000.txt …    구간별 전사 (.srt 등 포함)
+    └── logs/                        프로세스별 로그
+```
+
+프로세스 id와 녹음 시작 시각을 담은 숨김 파일(`.pids` 등)은 최상단에 있지만 Finder에서는 보이지 않습니다.
+
+## 5. 사용
+
+Claude Code에서 "줌 강의 녹음해서 정리해줘"라고 하면 스킬이 위 순서로 진행합니다. 직접 실행할 때:
 
 ```bash
-scripts/setup.sh                      # 최초 1회: 빌드 + 설치
+scripts/doctor.sh                     # 실행 전 점검: 설치·권한·전사·Zoom 창·공간 (--quick: 소리 시험 생략)
+scripts/setup.sh                      # 최초 1회: 설치
 scripts/start.sh ~/Desktop/lecture_x  # 녹음·녹화·전사 시작 (exit 3 = 무음)
 scripts/peek.sh  ~/Desktop/lecture_x  # 진행 중 구간 바로 받아쓰기
 scripts/watch.sh ~/Desktop/lecture_x  # 상태 점검 스트림
 scripts/stop.sh  ~/Desktop/lecture_x  # 종료 + 오디오/전사/영상 병합
 ```
 
-요구 사항: Apple Silicon, macOS 14.2 이상, ffmpeg, uv. Xcode CLT는 필요 없습니다: `setup.sh`가 이 플러그인 버전의 GitHub Release에서 미리 빌드된 `audiotee`·`winrec2`를 받아 SHA256을 확인하고 설치합니다. 받지 못하면(오프라인 등) 소스에서 빌드하는데, 그때만 Xcode CLT(swift)가 필요합니다. 항상 소스에서 빌드하려면 `LECTURE_BUILD_FROM_SOURCE=1 scripts/setup.sh`.
+## 6. 요구 사항
+
+- Apple Silicon, macOS 14.2 이상
+- ffmpeg, uv (`brew install ffmpeg uv`)
+- `scripts/setup.sh`가 `audiotee`·`winrec2`를 이 플러그인 버전의 GitHub Release에서 받아 SHA256을 확인하고 설치합니다. 소스에서 빌드하려면 `LECTURE_BUILD_FROM_SOURCE=1 scripts/setup.sh` (개발용).
+- 권한: 시스템 설정 → 개인정보 보호 및 보안 → 화면 및 시스템 오디오 녹음 → 터미널 앱을 켜야 합니다. 권한이 없으면 오류 없이 무음으로 녹음됩니다.
+- 설치와 권한이 잘 됐는지는 `scripts/doctor.sh`로 한 번에 확인합니다.
 
 서드파티 라이선스(AudioTee, MIT)는 [NOTICE.md](NOTICE.md)를 보세요.
-권한: 시스템 설정 → 화면 및 시스템 오디오 녹음 → 터미널 앱을 켜야 합니다. 권한이 없으면 무음으로 녹음됩니다.
 
 강의를 녹음·녹화하기 전에 주최 측 허락을 확인하세요.
