@@ -16,7 +16,7 @@ fi
 for i in {1..30}; do alive "$(cat $D/.vffmpeg.pid 2>/dev/null)" || break; sleep 1; done
 # Audio: killing the tap closes the fifo, so ffmpeg finalizes the last segment's header.
 alive "$(pid_of $D audiotee)" && kill -TERM $(pid_of $D audiotee)
-# audiotee can ignore SIGTERM (graceful shutdown hangs and it keeps writing): force it after 5 s.
+# audiotee can ignore SIGTERM (its graceful shutdown hangs and it goes on writing): force it after 5 s.
 for i in {1..5}; do alive "$(pid_of $D audiotee)" || break; sleep 1; done
 alive "$(pid_of $D audiotee)" && kill -KILL $(pid_of $D audiotee)
 for i in {1..30}; do alive "$(pid_of $D ffmpeg)" || break; sleep 1; done

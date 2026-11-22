@@ -79,6 +79,24 @@ Follow `${CLAUDE_PLUGIN_ROOT}/prompts/summarize.md`. Hand the transcript plus sa
 frames (one every ~30 s, deduplicated) to a subagent if the lecture is long. Deliver the
 notes the way the user wants (doc, markdown file, or chat).
 
+## 7. Unattended: join, record, leave
+
+When the user can't be at the Mac (e.g. "4시 수업 자동으로 들어가서 녹화해줘"), run on the day:
+
+```
+nohup $S/auto_lecture.sh "<zoom link or meeting ID>" [passcode] --at 15:55 --until 16:40 --end 18:00 --dir $D > $D.log 2>&1 &!
+```
+
+It waits for `--at` on the wall clock, joins with `zoom_join.sh`, runs `start.sh`, and stops when the meeting
+window has been gone for 3 minutes or at `--end`. At `--end` it first leaves the meeting with `zoom_leave.sh`, then runs `stop.sh`.
+If it is not in the meeting by `--until`, it records nothing and posts a notification. `LECTURE_MUTE=1` mutes the speakers.
+- `zoom_join.sh <link|ID> [pwd] [--until HH:MM]` turns an `https://…zoom.us/j/ID?pwd=…` link into `zoommtg://`,
+  so there is no browser prompt. It then presses the video preview's 참가 button, but only after the camera reads off,
+  and then the "computer audio" button. Exit 4 means the meeting never opened by the deadline.
+- `zoom_leave.sh` closes the meeting or waiting-room window and confirms 회의 나가기. It never quits Zoom.
+- Both scripts drive Zoom's UI through `zoom_ui.applescript`, which needs the terminal app enabled under
+  손쉬운 사용 (Accessibility). Read the log (`$D.log`) to see each click.
+
 ## Gotchas (learned the hard way)
 
 - **Headphones are fine.** The Core Audio tap captures what the system plays, whatever the output
@@ -108,4 +126,11 @@ notes the way the user wants (doc, markdown file, or chat).
   point Monitor at a script file.
 - **Stop by pid, never by name.** Scripts use `$D/.pids`, so a test run never kills a live lecture.
   winrec2 gets exactly one SIGINT (from the loop's trap); ffmpeg finalizes the segment on EOF.
+- **The zoommtg:// link stops at the video preview.** It waits for a click on 참가, and the camera is *on* there.
+  The `kZMUserDefaultMeetingStartWithVideo` default no longer turns it off. `zoom_ui.applescript` turns the
+  camera off and checks it before it presses 참가.
+- **A long `sleep` misses the join time.** It stalls while the Mac sleeps, so wait in short steps on the wall clock,
+  as `auto_lecture.sh` does. A closed lid still sleeps the Mac.
+- **Always give a waiting loop a deadline.** A loop that waited for the meeting window with no deadline kept
+  `caffeinate` running for two days, and it would have recorded whatever meeting opened next.
 - **Recording consent.** Remind the user once that recording may need the organizer's permission.
