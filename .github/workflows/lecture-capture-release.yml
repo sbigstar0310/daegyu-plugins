@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-14   # Apple Silicon
+    runs-on: macos-15   # Apple Silicon (macos-14 runners are retired)
     steps:
       - uses: actions/checkout@v4
 
