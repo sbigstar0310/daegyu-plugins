@@ -51,3 +51,17 @@ run_python() {  # run_python <script> [args...] — python3 when usable, else a 
   if python_is_usable; then python3 -I "$@"
   else uv run --no-project --managed-python python -I "$@"; fi
 }
+
+meeting_window() {  # true if the Zoom meeting window is up (query only, no capture stream: safe while recording)
+  local t
+  for t in "${(@s:|:)${LECTURE_WINDOW_TITLE:-Zoom 회의|Zoom Meeting}}"; do
+    $WINREC --size ${LECTURE_WINDOW_OWNER:-Zoom} $t 1280 >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
+epoch_at() {  # epoch_at HH:MM -> epoch seconds for that time today
+  date -j -f "%Y-%m-%d %H:%M" "$(date +%Y-%m-%d) $1" +%s
+}
+
+log() { print -r -- "[$(date +%H:%M:%S)] $*" }

@@ -134,7 +134,16 @@ scripts/start.sh ~/Desktop/lecture_x  # 녹음·녹화·전사 시작 (종료 �
 scripts/peek.sh  ~/Desktop/lecture_x  # 녹음 중인 구간을 바로 받아 적기
 scripts/watch.sh ~/Desktop/lecture_x  # 상태 확인 (구간마다 한 줄)
 scripts/stop.sh  ~/Desktop/lecture_x  # 종료하고 오디오·전사·영상 합치기
+
+# 자리를 비울 때: 시각에 맞춰 입장 → 녹음 → 종료 시각에 회의 나가기·병합 (수업 당일에 실행)
+nohup scripts/auto_lecture.sh "https://…zoom.us/j/ID?pwd=…" --at 15:55 --until 16:40 --end 18:00 \
+  --dir ~/Desktop/lecture_x > ~/Desktop/lecture_x.log 2>&1 &!
+scripts/zoom_join.sh "<링크 또는 회의 ID>" [암호]   # Zoom 앱으로 바로 입장, 미리보기에서 카메라 끄고 [참가]
+scripts/zoom_leave.sh                               # 회의(또는 대기실) 나가기
 ```
+
+- 자동 입장은 Zoom 버튼을 대신 누르므로 터미널 앱에 **손쉬운 사용** 권한이 필요합니다.
+- `--until`까지 회의가 열리지 않으면 녹음하지 않고 알림만 띄웁니다. 맥 덮개는 열어 두세요.
 
 ## 5. 요구 사항
 

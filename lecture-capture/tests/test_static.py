@@ -23,7 +23,8 @@ ALL_SCRIPTS = SHELL_SCRIPTS + [SCRIPTS / "merge.py", SCRIPTS / "winrec2" / "main
 def test_the_scripts_the_skill_names_are_all_there():
     names = {p.name for p in SHELL_SCRIPTS}
     assert {"_common.sh", "setup.sh", "doctor.sh", "start.sh", "stop.sh", "peek.sh", "live_tx.sh",
-            "watch.sh", "winrec_loop.sh"} <= names
+            "watch.sh", "winrec_loop.sh", "zoom_join.sh", "zoom_leave.sh", "auto_lecture.sh"} <= names
+    assert (SCRIPTS / "zoom_ui.applescript").is_file()
     assert (SCRIPTS / "merge.py").is_file()
     assert (SCRIPTS / "winrec2" / "main.swift").is_file()
 
