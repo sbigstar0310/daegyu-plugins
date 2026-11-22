@@ -5,7 +5,7 @@
 # If the host has not started yet, Zoom shows a waiting screen and joins by itself when it starts.
 # Exit 0 = in the meeting (meeting window up), 4 = not in by --until (default: 10 min), 2 = bad link.
 HERE=${0:A:h}; source $HERE/_common.sh
-zmodload zsh/zutil; zparseopts -D -E -until:=U
+zmodload zsh/zutil; zparseopts -D -E -- -until:=U
 deadline=$(( $(date +%s) + 600 )); [[ -n ${U[2]} ]] && deadline=$(epoch_at ${U[2]})
 link=${1:-}; id= pwd=
 if [[ $link =~ '^[0-9 -]{9,}$' ]]; then id=${link//[ -]/}; pwd=${2:-}

@@ -137,3 +137,11 @@ def test_no_script_puts_intermediates_next_to_the_finals(script):
 def test_merge_py_reads_intermediates_only_from_the_intermediate_folder():
     text = (SCRIPTS / "merge.py").read_text()
     assert not re.search(r'\bD / "(audio|video|transcript|logs)"', text)
+
+
+# zparseopts reads "-a NAME" as its own flag, so a spec like -at:=A breaks unless the specs follow "--".
+@pytest.mark.parametrize("script", SHELL_SCRIPTS, ids=lambda p: p.name)
+def test_zparseopts_specs_follow_a_double_dash(script):
+    for n, line in enumerate(script.read_text().splitlines(), 1):
+        if re.search(r"\bzparseopts\b", line) and not line.lstrip().startswith("#"):
+            assert re.search(r"zparseopts( -[DEFKM])* -- ", line), f"{script.name}:{n}: {line.strip()}"
