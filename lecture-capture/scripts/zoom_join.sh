@@ -3,7 +3,9 @@
 # Opens the meeting straight in the Zoom app (zoommtg://, no browser prompt) and clicks through the
 # video preview — 참가 only after the camera reads off — and the "join with computer audio" dialog.
 # If the host has not started yet, Zoom shows a waiting screen and joins by itself when it starts.
-# Exit 0 = in the meeting (meeting window up), 4 = not in by --until (default: 10 min), 2 = bad link.
+# Then it reads the 회의 menu and switches the mic and camera off if they are on: the preview can be skipped.
+# Exit 0 = in the meeting with mic and camera confirmed off (or a meeting was already open: left untouched),
+#      5 = in the meeting but mic/camera could not be confirmed off, 4 = not in by --until (default: 10 min), 2 = bad link.
 HERE=${0:A:h}; source $HERE/_common.sh
 zmodload zsh/zutil; zparseopts -D -E -- -until:=U
 deadline=$(( $(date +%s) + 600 )); [[ -n ${U[2]} ]] && deadline=$(epoch_at ${U[2]})
@@ -31,4 +33,15 @@ until meeting_window; do
 done
 log "회의 입장 확인"
 for i in {1..10}; do ui; [[ $REPLY == audio-joined ]] && break; sleep 2; done   # audio dialog can come a few seconds late
+# The preview (where the camera is turned off) is sometimes skipped, and nothing above mutes the mic:
+# read the 회의 menu, switch off whatever is on, and read it again.
+st=
+for i in {1..5}; do
+  items=$(osascript $HERE/zoom_ui.applescript av-off 2>&1)
+  st=$(zoom_av_state "${(@s:|:)items}")
+  av_is_off "$st" && break
+  sleep 2
+done
+log "상태: $st"
+av_is_off "$st" || { log "마이크·카메라가 꺼졌는지 확인하지 못함 (회의 메뉴: $items)"; exit 5 }
 exit 0

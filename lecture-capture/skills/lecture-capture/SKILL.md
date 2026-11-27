@@ -90,12 +90,33 @@ nohup $S/auto_lecture.sh "<zoom link or meeting ID>" [passcode] --at 15:55 --unt
 It waits for `--at` on the wall clock, joins with `zoom_join.sh`, runs `start.sh`, and stops when the meeting
 window has been gone for 3 minutes or at `--end`. At `--end` it first leaves the meeting with `zoom_leave.sh`, then runs `stop.sh`.
 If it is not in the meeting by `--until`, it records nothing and posts a notification. `LECTURE_MUTE=1` mutes the speakers.
-- `zoom_join.sh <link|ID> [pwd] [--until HH:MM]` turns an `https://…zoom.us/j/ID?pwd=…` link into `zoommtg://`,
-  so there is no browser prompt. It then presses the video preview's 참가 button, but only after the camera reads off,
-  and then the "computer audio" button. Exit 4 means the meeting never opened by the deadline.
+Every notification plays a sound.
+- **Join only** ("9시 수업 카메라 끄고 들어가만 줘"): add `--no-record`. It joins, notifies, keeps the Mac awake until the
+  meeting ends or `--end`, and never records or leaves. No `--dir` is needed.
+- **"Not in yet" alert**: `--warn 09:05` posts one notification if the join hasn't finished by then, and keeps trying
+  until `--until`.
+- **Another meeting already open at `--at`** (e.g. the morning class is still up) is not the lecture: it notifies once
+  and waits for that window to close, then joins. It never records or closes that meeting; if it is still open at
+  `--until`, it gives up (exit 4).
+- `zoom_join.sh <link|ID> [pwd] [--until HH:MM[:SS]]` turns an `https://…zoom.us/j/ID?pwd=…` link into `zoommtg://`,
+  so there is no browser prompt. If the video preview shows, it presses 참가 only after the camera reads off, then the
+  "computer audio" button. Then it reads the **회의 menu** and switches off the mic and camera if either is on, and logs
+  `상태: mic:off cam:off`. Exit 4 = the meeting never opened by the deadline; exit 5 = joined, but mic/camera could
+  not be confirmed off (auto_lecture alerts).
 - `zoom_leave.sh` closes the meeting or waiting-room window and confirms 회의 나가기. It never quits Zoom.
 - Both scripts drive Zoom's UI through `zoom_ui.applescript`, which needs the terminal app enabled under
   손쉬운 사용 (Accessibility). Read the log (`$D.log`) to see each click.
+- Recommend once that the user turn on, in Zoom → 설정 → 회의/웨비나: **내 카메라 끄기 유지**, **마이크 음소거 유지**
+  and **컴퓨터 오디오에 자동으로 연결**. They make the join safe even before the scripts check.
+- **Phone alerts**: scripts can only post macOS notifications. If the user wants a push on their phone over Remote
+  Control, schedule a one-shot check in the Claude session (CronCreate → read the log → PushNotification). It lives
+  only in that session, so tell the user to keep it open.
+- **Test end to end without a real class**: open zoom.us/test in Chrome; its 참가 button navigates to
+  `https://zoom.us/j/<id>?pwd=…` (catch it with the Navigation API and `preventDefault()` instead of letting Chrome
+  open Zoom). Run `auto_lecture.sh "<that link>" --no-record --at <now>` and check the log's `상태:` line, then
+  `zoom_leave.sh`. The ID **expires within minutes**, so fetch a fresh one right before each run. The test meeting
+  shows an extra "비디오를 시작하여 카메라를 테스트하세요" window that real meetings don't. Never test while a lecture
+  is being recorded or about to be joined.
 
 ## Gotchas (learned the hard way)
 
@@ -129,6 +150,16 @@ If it is not in the meeting by `--until`, it records nothing and posts a notific
 - **The zoommtg:// link stops at the video preview.** It waits for a click on 참가, and the camera is *on* there.
   The `kZMUserDefaultMeetingStartWithVideo` default no longer turns it off. `zoom_ui.applescript` turns the
   camera off and checks it before it presses 참가.
+- **The preview can be skipped.** Sometimes the meeting window comes up with no preview at all, so the camera-off step
+  never runs (seen 2026-11-27: the camera was on). Don't rely on the preview: `zoom_join.sh` checks the 회의 menu after
+  joining, and the Zoom settings above keep the camera and mic off from the start.
+- **The meeting window shows no toolbar buttons to Accessibility.** Searching it for "오디오 음소거" finds nothing. The
+  menu bar's 회의 (Meeting) menu names the action instead: "오디오 음소거 해제" / "Unmute Audio" means the mic is off,
+  "비디오 시작" / "Start Video" means the camera is off.
+- **Don't click Zoom blind.** Clicking "button 1" of the 설정 window hit 지금 업그레이드 and opened a checkout window.
+  Close windows with ⌘W or a button found by its description.
+- **Don't edit a script while a run of it is waiting.** zsh reads a script as it goes, so an edit can change or break
+  the waiting run. Edit, then stop that run (by its pid) and start it again.
 - **A long `sleep` misses the join time.** It stalls while the Mac sleeps, so wait in short steps on the wall clock,
   as `auto_lecture.sh` does. A closed lid still sleeps the Mac.
 - **Always give a waiting loop a deadline.** A loop that waited for the meeting window with no deadline kept

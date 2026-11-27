@@ -138,12 +138,18 @@ scripts/stop.sh  ~/Desktop/lecture_x  # 종료하고 오디오·전사·영상 �
 # 자리를 비울 때: 시각에 맞춰 입장 → 녹음 → 종료 시각에 회의 나가기·병합 (수업 당일에 실행)
 nohup scripts/auto_lecture.sh "https://…zoom.us/j/ID?pwd=…" --at 15:55 --until 16:40 --end 18:00 \
   --dir ~/Desktop/lecture_x > ~/Desktop/lecture_x.log 2>&1 &!
-scripts/zoom_join.sh "<링크 또는 회의 ID>" [암호]   # Zoom 앱으로 바로 입장, 미리보기에서 카메라 끄고 [참가]
+# 녹화 없이 입장만: 카메라·마이크 끄고 입장, 09:05까지 못 들어가면 알림 (회의에서 나가지 않음)
+nohup scripts/auto_lecture.sh "https://…zoom.us/j/ID?pwd=…" --no-record --at 08:55 --warn 09:05 --until 09:30 \
+  > ~/Desktop/join.log 2>&1 &!
+scripts/zoom_join.sh "<링크 또는 회의 ID>" [암호]   # Zoom 앱으로 바로 입장, 카메라·마이크를 끄고 회의 메뉴로 확인
 scripts/zoom_leave.sh                               # 회의(또는 대기실) 나가기
 ```
 
 - 자동 입장은 Zoom 버튼을 대신 누르므로 터미널 앱에 **손쉬운 사용** 권한이 필요합니다.
 - `--until`까지 회의가 열리지 않으면 녹음하지 않고 알림만 띄웁니다. 맥 덮개는 열어 두세요.
+- 입장 뒤 메뉴 막대의 **회의** 메뉴를 읽어 마이크·카메라가 켜져 있으면 끕니다(미리보기 없이 바로 입장되는 경우가 있어서). 끝내 확인하지 못하면 알림을 띄웁니다.
+- `--at`에 다른 회의가 이미 열려 있으면(예: 앞 수업) 그 회의를 녹화하거나 닫지 않고, 닫힐 때까지 기다렸다가 들어갑니다.
+- Zoom → 설정 → 회의/웨비나에서 **내 카메라 끄기 유지**, **마이크 음소거 유지**, **컴퓨터 오디오에 자동으로 연결**을 켜 두기를 권합니다.
 
 ## 5. 요구 사항
 
