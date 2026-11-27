@@ -145,3 +145,29 @@ def test_zparseopts_specs_follow_a_double_dash(script):
     for n, line in enumerate(script.read_text().splitlines(), 1):
         if re.search(r"\bzparseopts\b", line) and not line.lstrip().startswith("#"):
             assert re.search(r"zparseopts( -[DEFKM])* -- ", line), f"{script.name}:{n}: {line.strip()}"
+
+
+# The meeting window exposes no toolbar buttons to Accessibility; the 회의/Meeting menu is what
+# reliably says whether the mic and camera are on (issue #36).
+def test_zoom_ui_reads_and_switches_off_mic_and_camera_through_the_meeting_menu():
+    text = (SCRIPTS / "zoom_ui.applescript").read_text()
+    assert 'mode is "av"' in text and 'mode is "av-off"' in text
+    for name in ["회의", "Meeting", "오디오 음소거", "Mute Audio", "비디오 중지", "Stop Video"]:
+        assert name in text, name
+
+
+def test_zoom_join_checks_mic_and_camera_and_has_an_exit_code_for_it():
+    text = (SCRIPTS / "zoom_join.sh").read_text()
+    assert "av-off" in text and "zoom_av_state" in text and "av_is_off" in text
+    assert "5 =" in text.splitlines()[5] or "5 =" in "\n".join(text.splitlines()[:8])
+
+
+def test_auto_lecture_notifications_play_a_sound():
+    text = (SCRIPTS / "auto_lecture.sh").read_text()
+    assert 'sound name' in text
+
+
+def test_the_skill_documents_join_only_and_the_warn_alert():
+    text = (PLUGIN / "skills" / "lecture-capture" / "SKILL.md").read_text()
+    for s in ["--no-record", "--warn", "zoom.us/test", "내 카메라 끄기 유지"]:
+        assert s in text, s

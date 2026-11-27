@@ -5,6 +5,10 @@
 --          dialog → press it ("audio-joined"); else "none".
 --   leave: "회의 나가기"/"Leave Meeting" confirmation → press it ("left"); meeting or waiting-room window →
 --          press its close button, which brings up that confirmation ("closing"); else "nothing".
+--   av:    the item names of the 회의/Meeting menu, joined by "|" ("no-menu" if there is none). The meeting
+--          window shows no toolbar buttons to Accessibility, but this menu names the action: "오디오 음소거"
+--          while the mic is on, "오디오 음소거 해제" while it is off; "비디오 중지" / "비디오 시작" likewise.
+--   av-off: click "오디오 음소거"/"Mute Audio" and "비디오 중지"/"Stop Video" if listed, then do what av does.
 on run argv
 	set mode to item 1 of argv
 	tell application "System Events"
@@ -52,6 +56,32 @@ on run argv
 					end if
 				end repeat
 				return "nothing"
+			else if mode is "av" or mode is "av-off" then
+				set mb to missing value
+				repeat with nm in {"회의", "Meeting"}
+					try
+						set mb to menu 1 of menu bar item (contents of nm) of menu bar 1
+						exit repeat
+					end try
+				end repeat
+				if mb is missing value then return "no-menu"
+				if mode is "av-off" then
+					repeat with nm in {"오디오 음소거", "Mute Audio", "비디오 중지", "Stop Video"}
+						try
+							click menu item (contents of nm) of mb
+							delay 0.5
+						end try
+					end repeat
+				end if
+				set out to {}
+				repeat with i in menu items of mb
+					try
+						set n to name of i
+						if n is not missing value then set end of out to n
+					end try
+				end repeat
+				set AppleScript's text item delimiters to "|"
+				return out as text
 			end if
 		end tell
 	end tell

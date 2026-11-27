@@ -51,3 +51,9 @@ def test_an_unknown_flag_is_rejected(tmp_path):
     r = doctor(tmp_path, "--nope")
     assert r.returncode == 2
     assert "usage" in r.stdout
+
+
+def test_it_recommends_the_zoom_join_settings(tmp_path):
+    r = doctor(tmp_path, "--quick")
+    for s in ["내 카메라 끄기 유지", "마이크 음소거 유지", "컴퓨터 오디오에 자동으로 연결"]:
+        assert s in r.stdout, s

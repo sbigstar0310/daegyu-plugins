@@ -152,6 +152,8 @@ if pgrep -x zoom.us >/dev/null; then
 else
   warn "Zoom이 실행 중이 아닙니다" "강의에 들어간 뒤 시작해도 됩니다. 영상은 회의 창이 보일 때부터 녹화됩니다"
 fi
+print -r -- "  · 자동 입장을 쓴다면 Zoom → 설정 → 회의/웨비나에서 '내 카메라 끄기 유지', '마이크 음소거 유지',"
+print -r -- "    '컴퓨터 오디오에 자동으로 연결'을 켜 두세요 (미리보기 없이 바로 입장되는 경우가 있음)"
 
 head_ "저장 공간"
 mkdir -p $OUT_ROOT 2>/dev/null
