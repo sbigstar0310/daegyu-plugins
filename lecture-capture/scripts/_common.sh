@@ -52,12 +52,36 @@ run_python() {  # run_python <script> [args...] — python3 when usable, else a 
   else uv run --no-project --managed-python python -I "$@"; fi
 }
 
-meeting_window() {  # true if the Zoom meeting window is up (query only, no capture stream: safe while recording)
+meeting_window() {  # true if the Zoom meeting window is up. Asks Accessibility (System Events), never
+  # ScreenCaptureKit: a `winrec2 --size` query kills a live capture stream (-3805, issue #41), so this is
+  # what every caller uses, recording or not. Without Accessibility permission it falls back to SCK.
+  local t q= r p=${LECTURE_AX_PROCESS:-zoom.us}
+  pgrep -xq $p || return 1   # not running: asking System Events about a missing process stalls for 10-40 s
+  for t in "${(@s:|:)${LECTURE_WINDOW_TITLE:-Zoom 회의|Zoom Meeting}}"; do q+="${q:+ or }(exists window \"$t\")"; done
+  r=$(osascript -e "tell application \"System Events\" to tell process \"$p\" to ($q)" 2>&1)
+  case $r in
+    true) return 0 ;;
+    false|*-1728*|*-600*) return 1 ;;   # no window / the app isn't running
+    *) meeting_window_sck ;;            # no Accessibility permission: the old check
+  esac
+}
+
+meeting_window_sck() {  # ScreenCaptureKit window lookup. Never call it while a capture is running.
   local t
   for t in "${(@s:|:)${LECTURE_WINDOW_TITLE:-Zoom 회의|Zoom Meeting}}"; do
     $WINREC --size ${LECTURE_WINDOW_OWNER:-Zoom} $t 1280 >/dev/null 2>&1 && return 0
   done
   return 1
+}
+
+progress_frame() {  # progress_frame <ffmpeg -progress file> -> last frame count, 0 if none yet
+  local f=0
+  [[ -r $1 ]] && f=$(grep -a '^frame=' $1 2>/dev/null | tail -1 | cut -d= -f2)
+  print -r -- ${f:-0}
+}
+
+stall_secs() {  # stall_secs <prev frame> <cur frame> <secs without new frames> <step> -> new secs without frames
+  (( $2 != $1 )) && print 0 || print $(( $3 + $4 ))
 }
 
 epoch_at() {  # epoch_at HH:MM[:SS] -> epoch seconds for that time today

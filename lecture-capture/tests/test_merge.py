@@ -262,3 +262,27 @@ def test_stop_refuses_a_folder_that_never_started(tmp_path):
     assert r.returncode == 1
     assert ".pids 없음" in r.stdout
     assert not (d / ".stopped").exists()
+
+
+# ---- #43: segments whose timestamps run on from the previous segment --------------------------
+
+@pytest.mark.ffmpeg
+def test_segments_with_cumulative_timestamps_get_audio_of_their_own_length(tmp_path):
+    """ffmpeg's segment muxer without -reset_timestamps starts segment 2 at t=3, so its
+    format.duration reads 6 although it holds 3 s. The mux must cut 3 s of audio for it."""
+    started = noon_today()
+    d = make_lecture(tmp_path / "lec", started, loud=(True, True, True))
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    ffmpeg("-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration=6", "-c:v", "libx264",
+           "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", 10, "-f", "segment", "-segment_time", 3,
+           raw / "s%d.mkv")
+    segs = sorted(raw.glob("s*.mkv"))
+    assert len(segs) == 2
+    assert duration(segs[1]) > 5, "precondition: the second segment's timestamps are cumulative"
+    for off, s in zip((0, 3), segs):
+        s.rename(d / MID / "video" / f"v_{hhmmss(started + off)}.mkv")
+    stop(d)
+    st = {x["codec_type"]: float(x["duration"]) for x in probe(d / "lecture.mp4")["streams"]}
+    assert abs(st["audio"] - st["video"]) < 0.6, st
+    assert 5 < st["video"] < 7, st

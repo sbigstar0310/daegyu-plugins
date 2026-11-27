@@ -71,7 +71,9 @@ then the tap, waits for the last segment's transcription, then writes:
 - `transcript_full.txt` (with `## [mm:ss]` headers per segment) and `transcript_full.srt`
 - `lecture.mp4`: each mkv segment is muxed with its audio slice, aligned by the wall-clock start time in
   its filename, then the segments are concatenated. Video gaps are skipped rather than drifting.
-  Expect ≤1 s of skew.
+  Expect ≤1 s of skew. Segments are written with `-reset_timestamps 1`; for older ones whose timestamps run on
+  from the previous segment, merge.py takes `duration - start_time` as the length (issue #43: before, a
+  74-minute lecture came out as a 4-hour mp4 with the audio repeated).
 
 ## 6. Summarize
 
@@ -138,6 +140,15 @@ Every notification plays a sound.
   (repeating the latest frame) into ffmpeg/libx264.
 - **Never run two capture streams on the same window.** A second SCK stream (e.g. a test run)
   interrupts the live one with `SCStreamError -3805`. Do static checks only while a lecture is recording.
+- **Even a ScreenCaptureKit *query* breaks a live stream.** `winrec2 --size` (a window lookup, no capture) made the
+  live winrec2 fail with `-3805` every time auto_lecture.sh polled, so the video came out as 18 s pieces with 2 s
+  gaps (issue #41). `meeting_window` therefore asks Accessibility (System Events → `exists window "Zoom 회의"`)
+  and falls back to SCK only without Accessibility permission; doctor sizes the window only when no winrec2 runs.
+  Never call `winrec2 --size` yourself while a lecture is recording.
+- **Closing the lid ends the meeting (덮개).** The Mac sleeps and Zoom drops the call; the tap keeps the file going
+  but records silence. Tell the user to keep the lid open and dim the screen instead. After a rejoin, a winrec2 that
+  attached to a closing window stays alive with no frames; winrec_loop restarts it once ffmpeg's frame count
+  (`intermediate/logs/ffmpeg_video.progress`) hasn't moved for 60 s (issue #42).
 - **A new mkv segment shows 0 bytes for about a minute.** Static slides compress to almost nothing,
   so ffmpeg's write buffer hasn't flushed yet. This is normal. Check with `lsof -o` or wait before calling it broken.
 - **Segment wav headers are finalized only on close.** Read in-progress parts as raw s16le
