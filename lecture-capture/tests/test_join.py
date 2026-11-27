@@ -138,6 +138,7 @@ def rig(tmp_path):
          f'[[ -e {state}/window ]] && print true || print false; exit 0; fi\n'
          f'print -r -- "osascript $*" >> {state}/notes\n')
     stub(fake / "caffeinate", "exit 0\n")
+    stub(fake / "pgrep", "exit 0\n")   # "zoom.us is running", so the window state comes from osascript
     return {"root": root, "state": state, "calls": calls, "seq": seq,
             "path": f"{fake}:{os.environ['PATH']}"}
 
@@ -235,12 +236,14 @@ def test_a_join_that_cannot_confirm_mic_and_camera_off_alerts(rig, tmp_path):
 
 # ---- #41: the meeting-window check must not touch ScreenCaptureKit --------------------------
 
-def ax_rig(tmp_path, answer, rc=0):
-    """A fake osascript that prints `answer` (exit rc) and a fake winrec2 that logs its calls."""
+def ax_rig(tmp_path, answer, rc=0, running=True):
+    """A fake osascript that prints `answer` (exit rc), a fake pgrep that says whether Zoom runs,
+    and a fake winrec2 that logs its calls."""
     fake = tmp_path / "fake"
     fake.mkdir()
     log = tmp_path / "winrec_calls"
-    (fake / "osascript").write_text(f"#!/bin/zsh\nprint -r -- {answer!r}; exit {rc}\n")
+    (fake / "osascript").write_text(f"#!/bin/zsh\nprint ax >> {tmp_path}/ax_calls; print -r -- {answer!r}; exit {rc}\n")
+    (fake / "pgrep").write_text(f"#!/bin/zsh\nexit {0 if running else 1}\n")
     (fake / "winrec2").write_text(f"#!/bin/zsh\nprint -r -- \"$*\" >> {log}; print 1280 720\n")
     for f in fake.iterdir():
         f.chmod(0o755)
@@ -264,6 +267,13 @@ def test_zoom_not_running_reads_as_no_window_without_screencapturekit(tmp_path):
     fake, log = ax_rig(tmp_path, '66:70: execution error: process "zoom.us"을(를) 가져올 수 없습니다. (-1728)', rc=1)
     assert window(fake).stdout.strip() == "down"
     assert not log.exists()
+
+
+def test_zoom_not_running_is_answered_without_asking_system_events(tmp_path):
+    # System Events takes 10-40 s to answer about a process that doesn't exist (seen 2026-11-27).
+    fake, log = ax_rig(tmp_path, "true", running=False)
+    assert window(fake).stdout.strip() == "down"
+    assert not (tmp_path / "ax_calls").exists() and not log.exists()
 
 
 def test_without_accessibility_permission_it_falls_back_to_screencapturekit(tmp_path):

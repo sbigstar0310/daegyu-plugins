@@ -55,9 +55,10 @@ run_python() {  # run_python <script> [args...] — python3 when usable, else a 
 meeting_window() {  # true if the Zoom meeting window is up. Asks Accessibility (System Events), never
   # ScreenCaptureKit: a `winrec2 --size` query kills a live capture stream (-3805, issue #41), so this is
   # what every caller uses, recording or not. Without Accessibility permission it falls back to SCK.
-  local t q= r
+  local t q= r p=${LECTURE_AX_PROCESS:-zoom.us}
+  pgrep -xq $p || return 1   # not running: asking System Events about a missing process stalls for 10-40 s
   for t in "${(@s:|:)${LECTURE_WINDOW_TITLE:-Zoom 회의|Zoom Meeting}}"; do q+="${q:+ or }(exists window \"$t\")"; done
-  r=$(osascript -e "tell application \"System Events\" to tell process \"${LECTURE_AX_PROCESS:-zoom.us}\" to ($q)" 2>&1)
+  r=$(osascript -e "tell application \"System Events\" to tell process \"$p\" to ($q)" 2>&1)
   case $r in
     true) return 0 ;;
     false|*-1728*|*-600*) return 1 ;;   # no window / the app isn't running
