@@ -62,9 +62,12 @@ if not (audio.exists() and segs and started):
 
 
 def duration(p):
-    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+    """A segment's real length. Segments written without -reset_timestamps (before 0.4.1) carry
+    timestamps that run on from the previous segment, so format.duration alone is its end time."""
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration,start_time",
                           "-of", "json", str(p)], capture_output=True, text=True).stdout
-    return float(json.loads(out or "{}").get("format", {}).get("duration", 0) or 0)
+    f = json.loads(out or "{}").get("format", {})
+    return float(f.get("duration", 0) or 0) - float(f.get("start_time", 0) or 0)
 
 
 def seg_epoch(stem):
@@ -85,7 +88,7 @@ for i, v in enumerate(segs):
     part = tmp / f"p{i:03}.mp4"
     subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                     "-i", str(v), "-ss", f"{off:.2f}", "-t", f"{dur:.2f}", "-i", str(audio),
-                    "-map", "0:v", "-map", "1:a?", "-c", "copy", str(part)], check=False)
+                    "-map", "0:v", "-map", "1:a?", "-c", "copy", "-shortest", str(part)], check=False)
     if part.exists():
         parts.append(part)
 if parts:

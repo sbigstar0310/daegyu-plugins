@@ -171,3 +171,41 @@ def test_the_skill_documents_join_only_and_the_warn_alert():
     text = (PLUGIN / "skills" / "lecture-capture" / "SKILL.md").read_text()
     for s in ["--no-record", "--warn", "zoom.us/test", "내 카메라 끄기 유지"]:
         assert s in text, s
+
+
+
+# winrec2 --size opens a ScreenCaptureKit query that kills a live capture stream (-3805, issue #41).
+# Only winrec_loop.sh (sizing before its own capture) and the SCK fallback in _common.sh may run it.
+@pytest.mark.parametrize("script", SHELL_SCRIPTS, ids=lambda p: p.name)
+def test_only_the_loop_and_the_fallback_run_winrec2(script):
+    if script.name in ("winrec_loop.sh", "setup.sh", "start.sh"):
+        return
+    text = script.read_text()
+    if script.name == "_common.sh":
+        body = text.split("meeting_window_sck()", 1)[1].split("\n}", 1)[0]
+        assert "$WINREC --size" in body
+        text = text.replace(body, "")
+    if script.name == "doctor.sh":
+        assert "pgrep -x winrec2" in text, "doctor may size the window only while nothing is recording"
+        return
+    for n, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        assert not re.search(r"\$WINREC\b(?!\s*\]\])", line.replace("-x $WINREC", "")), f"{script.name}:{n}: {line.strip()}"
+
+
+def test_the_video_segments_restart_their_timestamps():
+    text = (SCRIPTS / "winrec_loop.sh").read_text()
+    assert "-reset_timestamps 1" in text
+    assert "-progress" in text and "stall_secs" in text
+
+
+def test_merge_uses_each_segments_real_length():
+    text = (SCRIPTS / "merge.py").read_text()
+    assert "start_time" in text and "-shortest" in text
+
+
+def test_the_skill_warns_about_the_lid_and_the_window_check():
+    text = (PLUGIN / "skills" / "lecture-capture" / "SKILL.md").read_text()
+    for s in ["덮개", "-3805", "Accessibility", "reset_timestamps"]:
+        assert s in text, s

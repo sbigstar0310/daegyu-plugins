@@ -119,19 +119,27 @@ def rig(tmp_path):
         path.write_text(STUB + body)
         path.chmod(0o755)
 
-    # winrec2 --size: "the meeting window is up" while state/window exists.
-    stub(root / "bin" / "winrec2", f'[[ -e {state}/window ]] && {{ print 1280 720; exit 0 }}; exit 1\n')
+    seq = state / "seq"
+    # winrec2 --size would also see the window, but it breaks a live capture stream (issue #41):
+    # every call is logged so a test can prove nothing calls it once recording has started.
+    stub(root / "bin" / "winrec2", f'print winrec2 >> {seq}; '
+                                   f'[[ -e {state}/window ]] && {{ print 1280 720; exit 0 }}; exit 1\n')
     s = root / "scripts"
     stub(s / "zoom_join.sh", f'print "join $*" >> {calls}; sleep ${{JOIN_DELAY:-0}}; '
                              f'touch {state}/window; print "상태: mic:off cam:off"; exit ${{JOIN_RC:-0}}\n')
     stub(s / "zoom_leave.sh", f'print leave >> {calls}; rm -f {state}/window; exit 0\n')
-    stub(s / "start.sh", f'print "start $*" >> {calls}; exit 0\n')
+    stub(s / "start.sh", f'print "start $*" >> {calls}; print start >> {seq}; exit 0\n')
     stub(s / "stop.sh", f'print "stop $*" >> {calls}; exit 0\n')
     fake = tmp_path / "fakebin"
     fake.mkdir()
-    stub(fake / "osascript", f'print -r -- "osascript $*" >> {state}/notes\n')
+    # osascript: Accessibility window queries answer from state/window; anything else is a notification.
+    stub(fake / "osascript",
+         f'if [[ "$*" == *"exists window"* ]]; then print ax >> {seq}; '
+         f'[[ -e {state}/window ]] && print true || print false; exit 0; fi\n'
+         f'print -r -- "osascript $*" >> {state}/notes\n')
     stub(fake / "caffeinate", "exit 0\n")
-    return {"root": root, "state": state, "calls": calls, "path": f"{fake}:{os.environ['PATH']}"}
+    return {"root": root, "state": state, "calls": calls, "seq": seq,
+            "path": f"{fake}:{os.environ['PATH']}"}
 
 
 def hms(offset=0):
@@ -223,3 +231,84 @@ def test_a_join_that_cannot_confirm_mic_and_camera_off_alerts(rig, tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     notes = (rig["state"] / "notes").read_text()
     assert "카메라" in notes or "마이크" in notes
+
+
+# ---- #41: the meeting-window check must not touch ScreenCaptureKit --------------------------
+
+def ax_rig(tmp_path, answer, rc=0):
+    """A fake osascript that prints `answer` (exit rc) and a fake winrec2 that logs its calls."""
+    fake = tmp_path / "fake"
+    fake.mkdir()
+    log = tmp_path / "winrec_calls"
+    (fake / "osascript").write_text(f"#!/bin/zsh\nprint -r -- {answer!r}; exit {rc}\n")
+    (fake / "winrec2").write_text(f"#!/bin/zsh\nprint -r -- \"$*\" >> {log}; print 1280 720\n")
+    for f in fake.iterdir():
+        f.chmod(0o755)
+    return fake, log
+
+
+def window(fake):
+    return zsh(f"source {COMMON}; WINREC={fake}/winrec2; meeting_window && print up || print down",
+               env={"PATH": f"{fake}:{os.environ['PATH']}"})
+
+
+@pytest.mark.parametrize("answer, want", [("true", "up"), ("false", "down")])
+def test_meeting_window_asks_accessibility_not_screencapturekit(tmp_path, answer, want):
+    fake, log = ax_rig(tmp_path, answer)
+    r = window(fake)
+    assert r.stdout.strip() == want, r.stderr
+    assert not log.exists(), "winrec2 --size breaks a live capture stream (-3805)"
+
+
+def test_zoom_not_running_reads_as_no_window_without_screencapturekit(tmp_path):
+    fake, log = ax_rig(tmp_path, '66:70: execution error: process "zoom.us"을(를) 가져올 수 없습니다. (-1728)', rc=1)
+    assert window(fake).stdout.strip() == "down"
+    assert not log.exists()
+
+
+def test_without_accessibility_permission_it_falls_back_to_screencapturekit(tmp_path):
+    fake, log = ax_rig(tmp_path, "System Events got an error: osascript is not allowed assistive access. (-25211)",
+                       rc=1)
+    assert window(fake).stdout.strip() == "up"
+    assert log.exists() and "--size" in log.read_text()
+
+
+def test_recording_never_calls_winrec2_after_start(rig, tmp_path):
+    d = tmp_path / "lec"
+    import threading
+    def close_later():
+        time.sleep(5)
+        (rig["state"] / "window").unlink()
+    threading.Thread(target=close_later, daemon=True).start()
+    r = auto(rig, "123456789", "--at", hms(), "--until", hms(60), "--end", hms(60), "--dir", str(d))
+    assert r.returncode == 0, r.stdout + r.stderr
+    seq = lines(rig["seq"])
+    assert "start" in seq, seq
+    after = seq[seq.index("start") + 1:]
+    assert "winrec2" not in after, seq
+    assert "ax" in after, "the end-of-lecture loop should still be watching the window"
+
+
+# ---- #42: a capture that is alive but delivers no frames gets restarted -----------------------
+
+@pytest.mark.parametrize("body, want", [
+    ("frame=10\nfps=10\nprogress=continue\nframe=25\nprogress=continue\n", "25"),
+    ("", "0"),
+])
+def test_progress_frame_reads_the_last_frame_count(tmp_path, body, want):
+    f = tmp_path / "progress"
+    f.write_text(body)
+    assert fn(f"progress_frame {f}").stdout.strip() == want
+
+
+def test_progress_frame_of_a_missing_file_is_zero(tmp_path):
+    assert fn(f"progress_frame {tmp_path}/nope").stdout.strip() == "0"
+
+
+@pytest.mark.parametrize("prev, cur, still, step, want", [
+    (10, 20, 30, 5, 0),     # frames moved: reset
+    (20, 20, 30, 5, 35),    # no new frames: accumulate
+    (0, 0, 0, 5, 5),
+])
+def test_stall_secs(prev, cur, still, step, want):
+    assert fn(f"stall_secs {prev} {cur} {still} {step}").stdout.strip() == str(want)

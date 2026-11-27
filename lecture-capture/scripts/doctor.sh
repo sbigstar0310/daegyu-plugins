@@ -137,14 +137,18 @@ fi
 
 if pgrep -x zoom.us >/dev/null; then
   found=
-  if [[ -x $WINREC ]]; then
+  if pgrep -x winrec2 >/dev/null; then
+    # A lecture is recording: a ScreenCaptureKit query would break its stream (-3805). Ask Accessibility.
+    meeting_window && found=recording
+  elif [[ -x $WINREC ]]; then
     titles_spec=${LECTURE_WINDOW_TITLE:-"Zoom 회의|Zoom Meeting"}
     for t in "${(@s:|:)titles_spec}"; do
       wh=$($WINREC --size ${LECTURE_WINDOW_OWNER:-Zoom} $t 1280 2>/dev/null) && { found=$wh; break }
     done
   fi
   if [[ -n $found ]]; then
-    ok "Zoom 회의 창을 찾음 (영상 ${found// /x})"
+    if [[ $found == recording ]]; then ok "Zoom 회의 창을 찾음 (녹화 중이라 영상 크기는 확인하지 않음)"
+    else ok "Zoom 회의 창을 찾음 (영상 ${found// /x})"; fi
   else
     warn "Zoom은 켜져 있지만 회의 창을 찾지 못했습니다" \
          "회의에 들어간 뒤 다시 실행하세요. 계속 안 보이면 화면 녹화 권한도 확인 (녹음 시작 후에도 영상만 빠질 수 있음)"
